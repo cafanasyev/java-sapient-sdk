@@ -1,11 +1,14 @@
 package io.sapient.transmission;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
 import io.sapient.transport.IClient;
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -15,7 +18,9 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.mockito.ArgumentCaptor;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.Alert;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.AlertAck;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.DetectionReport;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.RegistrationAck;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
@@ -304,6 +309,109 @@ class NodeDispatcherTest {
 
             verify(s.node, timeout(1000)).onTask(argThat(t -> "task-1".equals(t.getTaskId())));
         }
+    }
+
+    static SapientMessage capturePublished(IClient client) throws Exception {
+        ArgumentCaptor<ByteBuffer> captor = ArgumentCaptor.forClass(ByteBuffer.class);
+        verify(client).publish(captor.capture(), any(Duration.class));
+        return SapientMessage.parseFrom(captor.getValue().array());
+    }
+
+    static Instant toInstant(com.google.protobuf.Timestamp ts) {
+        return Instant.ofEpochSecond(ts.getSeconds(), ts.getNanos());
+    }
+
+    static void assertRecentTimestamp(SapientMessage msg, Instant before) {
+        assertTrue(msg.hasTimestamp(), "message should have a timestamp");
+        Instant ts = toInstant(msg.getTimestamp());
+        Instant after = Instant.now();
+        assertFalse(ts.isBefore(before), "timestamp should not be before the call");
+        assertFalse(ts.isAfter(after), "timestamp should not be after now");
+    }
+
+    @Test
+    @Timeout(3)
+    void publishRegistrationSerializesToClient() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults());
+        UUID nodeId = UUID.randomUUID();
+
+        Instant before = Instant.now();
+        dispatcher.publish(Registration.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(SapientMessage.ContentCase.REGISTRATION, msg.getContentCase());
+        assertEquals(nodeId.toString(), msg.getNodeId());
+        assertRecentTimestamp(msg, before);
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void publishStatusReportSerializesToClient() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults());
+        UUID nodeId = UUID.randomUUID();
+
+        Instant before = Instant.now();
+        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(SapientMessage.ContentCase.STATUS_REPORT, msg.getContentCase());
+        assertEquals(nodeId.toString(), msg.getNodeId());
+        assertRecentTimestamp(msg, before);
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void publishAlertSerializesToClient() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults());
+        UUID nodeId = UUID.randomUUID();
+
+        Instant before = Instant.now();
+        dispatcher.publish(Alert.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(SapientMessage.ContentCase.ALERT, msg.getContentCase());
+        assertEquals(nodeId.toString(), msg.getNodeId());
+        assertRecentTimestamp(msg, before);
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void publishDetectionReportSerializesToClient() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults());
+        UUID nodeId = UUID.randomUUID();
+
+        Instant before = Instant.now();
+        dispatcher.publish(DetectionReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(SapientMessage.ContentCase.DETECTION_REPORT, msg.getContentCase());
+        assertEquals(nodeId.toString(), msg.getNodeId());
+        assertRecentTimestamp(msg, before);
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void goodbyeSerializesToClient() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults());
+        UUID nodeId = UUID.randomUUID();
+
+        Instant before = Instant.now();
+        dispatcher.goodbye(nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(SapientMessage.ContentCase.CONTENT_NOT_SET, msg.getContentCase());
+        assertEquals(nodeId.toString(), msg.getNodeId());
+        assertRecentTimestamp(msg, before);
+        dispatcher.close();
     }
 
     @Test

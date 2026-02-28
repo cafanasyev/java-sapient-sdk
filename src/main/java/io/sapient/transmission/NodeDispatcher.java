@@ -1,10 +1,12 @@
 package io.sapient.transmission;
 
+import com.google.protobuf.Timestamp;
 import io.sapient.transport.IClient;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -105,23 +107,48 @@ public class NodeDispatcher implements INodeDispatcher {
 
     @Override
     public void publish(Registration registration, UUID nodeId, Duration timeout)
-            throws TimeoutException, InterruptedException {}
+            throws TimeoutException, InterruptedException {
+        publish(SapientMessage.newBuilder().setRegistration(registration), nodeId, timeout);
+    }
 
     @Override
     public void publish(StatusReport status, UUID nodeId, Duration timeout)
-            throws TimeoutException, InterruptedException {}
+            throws TimeoutException, InterruptedException {
+        publish(SapientMessage.newBuilder().setStatusReport(status), nodeId, timeout);
+    }
 
     @Override
     public void publish(Alert alert, UUID nodeId, Duration timeout)
-            throws TimeoutException, InterruptedException {}
+            throws TimeoutException, InterruptedException {
+        publish(SapientMessage.newBuilder().setAlert(alert), nodeId, timeout);
+    }
 
     @Override
     public void publish(DetectionReport detection, UUID nodeId, Duration timeout)
-            throws TimeoutException, InterruptedException {}
+            throws TimeoutException, InterruptedException {
+        publish(SapientMessage.newBuilder().setDetectionReport(detection), nodeId, timeout);
+    }
 
     @Override
     public void goodbye(UUID nodeId, Duration timeout)
-            throws TimeoutException, InterruptedException {}
+            throws TimeoutException, InterruptedException {
+        publish(SapientMessage.newBuilder(), nodeId, timeout);
+    }
+
+    private void publish(SapientMessage.Builder builder, UUID nodeId, Duration timeout)
+            throws TimeoutException, InterruptedException {
+        SapientMessage message =
+                builder.setNodeId(nodeId.toString()).setTimestamp(timestampNow()).build();
+        client.publish(ByteBuffer.wrap(message.toByteArray()), timeout);
+    }
+
+    private static Timestamp timestampNow() {
+        Instant now = Instant.now();
+        return Timestamp.newBuilder()
+                .setSeconds(now.getEpochSecond())
+                .setNanos(now.getNano())
+                .build();
+    }
 
     @Override
     public void close() {
