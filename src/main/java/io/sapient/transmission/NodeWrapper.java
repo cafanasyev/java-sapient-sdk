@@ -7,6 +7,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import lombok.Getter;
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
@@ -16,11 +17,11 @@ import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 @Slf4j
 class NodeWrapper implements AutoCloseable {
 
-    @NonNull final INode node;
-    final AtomicBoolean registered = new AtomicBoolean(false);
-    final AtomicReference<UUID> fusionNodeId = new AtomicReference<>();
-    final AtomicReference<StatusReport> lastStatusReport = new AtomicReference<>();
-    final BlockingQueue<RegistrationAck> ackQueue = new ArrayBlockingQueue<>(1);
+    @Getter @NonNull private final INode node;
+    @Getter private final AtomicBoolean registered = new AtomicBoolean(false);
+    @Getter private final AtomicReference<UUID> fusionNodeId = new AtomicReference<>();
+    @Getter private final AtomicReference<StatusReport> lastStatusReport = new AtomicReference<>();
+    @Getter private final BlockingQueue<RegistrationAck> ackQueue = new ArrayBlockingQueue<>(1);
 
     private final INodeDispatcher dispatcher;
     private final NodeDispatcherConfig config;

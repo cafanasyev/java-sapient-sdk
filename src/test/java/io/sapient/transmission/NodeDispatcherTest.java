@@ -157,7 +157,7 @@ class NodeDispatcherTest {
             verify(s.dispatcher, timeout(1000))
                     .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
 
-            assertNull(s.dispatcher.nodes.get(s.nodeId).fusionNodeId.get());
+            assertNull(s.dispatcher.nodes.get(s.nodeId).getFusionNodeId().get());
         }
     }
 
@@ -174,7 +174,7 @@ class NodeDispatcherTest {
             sendAck(s.onMessage, s.nodeId, true);
             verify(s.node, timeout(1000)).onRegistrationAck(any());
 
-            assertEquals(FUSION_NODE_ID, s.dispatcher.nodes.get(s.nodeId).fusionNodeId.get());
+            assertEquals(FUSION_NODE_ID, s.dispatcher.nodes.get(s.nodeId).getFusionNodeId().get());
         }
     }
 
@@ -191,7 +191,7 @@ class NodeDispatcherTest {
             sendAck(s.onMessage, s.nodeId, false);
             verify(s.node, timeout(1000)).onRegistrationAck(any());
 
-            assertNull(s.dispatcher.nodes.get(s.nodeId).fusionNodeId.get());
+            assertNull(s.dispatcher.nodes.get(s.nodeId).getFusionNodeId().get());
         }
     }
 
@@ -286,7 +286,7 @@ class NodeDispatcherTest {
             verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
             Thread.sleep(50);
 
-            assertNull(s.dispatcher.nodes.get(s.nodeId).fusionNodeId.get());
+            assertNull(s.dispatcher.nodes.get(s.nodeId).getFusionNodeId().get());
         }
     }
 
@@ -310,7 +310,7 @@ class NodeDispatcherTest {
             verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
             Thread.sleep(50);
 
-            assertNull(s.dispatcher.nodes.get(s.nodeId).lastStatusReport.get());
+            assertNull(s.dispatcher.nodes.get(s.nodeId).getLastStatusReport().get());
         }
     }
 
@@ -604,7 +604,7 @@ class NodeDispatcherTest {
         UUID fusionId = UUID.randomUUID();
 
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
-        dispatcher.nodes.get(nodeId).fusionNodeId.set(fusionId);
+        dispatcher.nodes.get(nodeId).getFusionNodeId().set(fusionId);
 
         dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
 

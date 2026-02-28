@@ -77,9 +77,9 @@ public class NodeDispatcher implements INodeDispatcher {
                     return;
                 }
                 if (message.getRegistrationAck().getAcceptance()) {
-                    node.fusionNodeId.set(UUID.fromString(message.getNodeId()));
+                    node.getFusionNodeId().set(UUID.fromString(message.getNodeId()));
                 }
-                if (!node.ackQueue.offer(message.getRegistrationAck())) {
+                if (!node.getAckQueue().offer(message.getRegistrationAck())) {
                     log.error("ack queue full, dropping ack for node: {}", destinationId);
                 }
             }
@@ -88,37 +88,51 @@ public class NodeDispatcher implements INodeDispatcher {
                     log.error("no node registered for destination: {}", destinationId);
                     return;
                 }
-                node.node.onAlertAck(message.getAlertAck());
+                node.getNode().onAlertAck(message.getAlertAck());
             }
             case TASK -> handleTask(message.getTask(), destinationId, message.getNodeId(), node);
             default -> {}
         }
     }
 
-    private void handleTask(Task task, UUID nodeId, String senderNodeId, NodeWrapper node)
+    private void handleTask(Task task, UUID nodeId, String senderNodeId, NodeWrapper nodeWrapper)
             throws TimeoutException, InterruptedException {
-        if (node == null) {
+        if (nodeWrapper == null) {
             rejectTask(task, nodeId, senderNodeId, "node not registered: " + nodeId);
             return;
         }
+
+        INode node = nodeWrapper.getNode();
+
         if (isRegistrationRequest(task)) {
-            if (node.node.isOnline()) sendRegistration(node);
-            else rejectTask(task, nodeId, senderNodeId, "node offline");
+            if (node.isOnline()) {
+                publish(node.getRegistration(), node.getNodeId(), config.publishTimeout());
+            } else {
+                rejectTask(task, nodeId, senderNodeId, "node offline");
+            }
             return;
         }
-        node.node.onTask(task);
+
+        node.onTask(task);
     }
 
     private void rejectTask(Task task, UUID nodeId, String destination, String reason)
             throws TimeoutException, InterruptedException {
-        TaskAck rejected =
+        log.warn(
+                "rejecting task {} [command={}, request={}] for node {}: {}",
+                task.getTaskId(),
+                task.getCommand().getCommandCase(),
+                task.getCommand().getRequest(),
+                nodeId,
+                reason);
+        TaskAck reject =
                 TaskAck.newBuilder()
                         .setTaskId(task.getTaskId())
                         .setTaskStatus(TaskAck.TaskStatus.TASK_STATUS_REJECTED)
                         .addReason(reason)
                         .build();
         publish(
-                SapientMessage.newBuilder().setDestinationId(destination).setTaskAck(rejected),
+                SapientMessage.newBuilder().setDestinationId(destination).setTaskAck(reject),
                 nodeId,
                 config.publishTimeout());
     }
@@ -127,10 +141,6 @@ public class NodeDispatcher implements INodeDispatcher {
         return task.hasCommand()
                 && task.getCommand().getCommandCase() == Task.Command.CommandCase.REQUEST
                 && "registration".equalsIgnoreCase(task.getCommand().getRequest());
-    }
-
-    private void sendRegistration(NodeWrapper node) throws TimeoutException, InterruptedException {
-        publish(node.node.getRegistration(), node.node.getNodeId(), config.publishTimeout());
     }
 
     @Override
@@ -147,7 +157,7 @@ public class NodeDispatcher implements INodeDispatcher {
         if (wrapper == null) return;
 
         wrapper.close();
-        if (!wrapper.registered.getAndSet(false)) return;
+        if (!wrapper.getRegistered().getAndSet(false)) return;
 
         try {
             log.info("sending goodbye for the node: {}", node.getNodeId());
@@ -169,7 +179,7 @@ public class NodeDispatcher implements INodeDispatcher {
         NodeWrapper node = nodes.get(nodeId);
         StatusReport.Info info = StatusReport.Info.INFO_NEW;
         if (node != null) {
-            StatusReport prev = node.lastStatusReport.getAndSet(status);
+            StatusReport prev = node.getLastStatusReport().getAndSet(status);
             if (prev != null && clearInfo(prev).equals(clearInfo(status))) {
                 info = StatusReport.Info.INFO_UNCHANGED;
             }
@@ -205,7 +215,7 @@ public class NodeDispatcher implements INodeDispatcher {
         builder.setNodeId(nodeId.toString()).setTimestamp(timestampNow());
         NodeWrapper node = nodes.get(nodeId);
         if (node != null) {
-            UUID fusionNodeId = node.fusionNodeId.get();
+            UUID fusionNodeId = node.getFusionNodeId().get();
             if (fusionNodeId != null) {
                 builder.setDestinationId(fusionNodeId.toString());
             }
