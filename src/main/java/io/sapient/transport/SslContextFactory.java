@@ -37,19 +37,24 @@ public class SslContextFactory {
         KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
 
         trustStore.load(null);
-        trustStore.setCertificateEntry("ca", cf.generateCertificate(new ByteArrayInputStream(caCert)));
+        trustStore.setCertificateEntry(
+                "ca", cf.generateCertificate(new ByteArrayInputStream(caCert)));
 
         KeyStore keyStore = KeyStore.getInstance("PKCS12");
         keyStore.load(null);
 
         Certificate cert = cf.generateCertificate(new ByteArrayInputStream(clientCert));
-        PrivateKey key = KeyFactory.getInstance(keyAlgorithm).generatePrivate(new PKCS8EncodedKeySpec(clientKey));
+        PrivateKey key =
+                KeyFactory.getInstance(keyAlgorithm)
+                        .generatePrivate(new PKCS8EncodedKeySpec(clientKey));
         keyStore.setKeyEntry("client", key, new char[0], new Certificate[] {cert});
 
-        TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        TrustManagerFactory tmf =
+                TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
         tmf.init(trustStore);
 
-        KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        KeyManagerFactory kmf =
+                KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         kmf.init(keyStore, new char[0]);
 
         SSLContext ctx = SSLContext.getInstance("TLS");

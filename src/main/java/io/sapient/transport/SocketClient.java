@@ -139,7 +139,8 @@ public class SocketClient implements IClient, Runnable {
 
         long deadline = System.nanoTime() + timeout.toNanos();
 
-        // trying to reconnect and write message only until timeout reached or SocketClient is stopped
+        // trying to reconnect and write message only until timeout reached or SocketClient is
+        // stopped
         while (running.get()) {
             long remaining = deadline - System.nanoTime();
             if (remaining <= 0) {

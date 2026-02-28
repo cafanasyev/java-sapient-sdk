@@ -1,7 +1,6 @@
 package io.sapient.transmission;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
 import io.sapient.transport.IClient;
@@ -16,10 +15,12 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.mockito.ArgumentCaptor;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.AlertAck;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.RegistrationAck;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.Task;
 
 @Execution(ExecutionMode.CONCURRENT)
 class NodeDispatcherTest {
@@ -117,7 +118,8 @@ class NodeDispatcherTest {
                     .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
 
             sendAck(s.onMessage, s.nodeId, true);
-            verify(s.node, timeout(1000)).onRegistrationAck(argThat(RegistrationAck::getAcceptance));
+            verify(s.node, timeout(1000))
+                    .onRegistrationAck(argThat(RegistrationAck::getAcceptance));
         }
     }
 
@@ -150,7 +152,8 @@ class NodeDispatcherTest {
 
             Thread.sleep(200);
 
-            verify(s.dispatcher, never()).publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+            verify(s.dispatcher, never())
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
         }
     }
 
@@ -261,6 +264,45 @@ class NodeDispatcherTest {
             Thread.sleep(100);
 
             verify(s.dispatcher, never()).goodbye(any(), any(Duration.class));
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void alertAckDeliveredToNode() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            AlertAck alertAck = AlertAck.newBuilder().setAlertId("alert-1").build();
+            SapientMessage msg =
+                    SapientMessage.newBuilder()
+                            .setDestinationId(s.nodeId.toString())
+                            .setAlertAck(alertAck)
+                            .build();
+            s.onMessage.accept(ByteBuffer.wrap(msg.toByteArray()));
+
+            verify(s.node, timeout(1000))
+                    .onAlertAck(argThat(ack -> "alert-1".equals(ack.getAlertId())));
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void taskDeliveredToNode() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            Task task = Task.newBuilder().setTaskId("task-1").build();
+            SapientMessage msg =
+                    SapientMessage.newBuilder()
+                            .setDestinationId(s.nodeId.toString())
+                            .setTask(task)
+                            .build();
+            s.onMessage.accept(ByteBuffer.wrap(msg.toByteArray()));
+
+            verify(s.node, timeout(1000)).onTask(argThat(t -> "task-1".equals(t.getTaskId())));
         }
     }
 

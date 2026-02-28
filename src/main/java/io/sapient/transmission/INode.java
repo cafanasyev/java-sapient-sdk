@@ -42,6 +42,13 @@ public interface INode {
     void onRegistrationAck(RegistrationAck ack);
 
     /**
+     * Called when an {@link AlertAck} is received for this node.
+     *
+     * @param ack the alert acknowledgement from the fusion node
+     */
+    void onAlertAck(AlertAck ack);
+
+    /**
      * Called when a {@link Task} is received for this node.
      *
      * @param task the task assigned by the fusion node

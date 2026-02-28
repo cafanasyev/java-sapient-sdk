@@ -57,12 +57,24 @@ public class NodeDispatcher implements INodeDispatcher {
 
             if (message.getContentCase() == SapientMessage.ContentCase.REGISTRATION_ACK) {
                 UUID destinationId = UUID.fromString(message.getDestinationId());
-                NodeWrapper wrapper = nodes.get(destinationId);
-                if (wrapper != null && !wrapper.ackQueue.offer(message.getRegistrationAck())) {
+                NodeWrapper node = nodes.get(destinationId);
+                if (node != null && !node.ackQueue.offer(message.getRegistrationAck())) {
                     logger.log(
                             Level.WARNING,
                             "ack queue full, dropping ack for node: {0}",
                             destinationId);
+                }
+            } else if (message.getContentCase() == SapientMessage.ContentCase.ALERT_ACK) {
+                UUID destinationId = UUID.fromString(message.getDestinationId());
+                NodeWrapper node = nodes.get(destinationId);
+                if (node != null) {
+                    node.node.onAlertAck(message.getAlertAck());
+                }
+            } else if (message.getContentCase() == SapientMessage.ContentCase.TASK) {
+                UUID destinationId = UUID.fromString(message.getDestinationId());
+                NodeWrapper node = nodes.get(destinationId);
+                if (node != null) {
+                    node.node.onTask(message.getTask());
                 }
             }
         } catch (Exception e) {
