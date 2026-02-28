@@ -1,5 +1,9 @@
 package io.sapient.transmission;
 
+import static java.util.logging.Level.INFO;
+import static java.util.logging.Level.SEVERE;
+
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Timestamp;
 import io.sapient.transport.IClient;
 import jakarta.inject.Inject;
@@ -11,7 +15,6 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeoutException;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 import lombok.NonNull;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Alert;
@@ -19,6 +22,8 @@ import uk.gov.dstl.sapientmsg.bsiflex335v2.DetectionReport;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.Task;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.TaskAck;
 
 /**
  * NodeDispatcher connects to a fusion node, registers all provided nodes and sends StatusReports
@@ -53,50 +58,99 @@ public class NodeDispatcher implements INodeDispatcher {
 
     private void onMessage(ByteBuffer buffer) {
         try {
-            byte[] bytes = new byte[buffer.remaining()];
-            buffer.get(bytes);
-            SapientMessage message = SapientMessage.parseFrom(bytes);
-            UUID destinationId = UUID.fromString(message.getDestinationId());
-            logger.log(
-                    Level.INFO,
-                    "received {0} for node: {1}",
-                    new Object[] {message.getContentCase(), destinationId});
-            NodeWrapper node = nodes.get(destinationId);
-            if (node == null) {
-                logger.log(Level.SEVERE, "no node registered for destination: {0}", destinationId);
-                return;
-            }
-
-            switch (message.getContentCase()) {
-                case REGISTRATION_ACK -> {
-                    if (message.getRegistrationAck().getAcceptance()) {
-                        node.fusionNodeId.set(UUID.fromString(message.getNodeId()));
-                    }
-                    if (!node.ackQueue.offer(message.getRegistrationAck())) {
-                        logger.log(
-                                Level.SEVERE,
-                                "ack queue full, dropping ack for node: {0}",
-                                destinationId);
-                    }
-                }
-                case ALERT_ACK -> node.node.onAlertAck(message.getAlertAck());
-                case TASK -> node.node.onTask(message.getTask());
-                default -> {}
-            }
-        } catch (Exception e) {
-            logger.log(Level.SEVERE, "failed to process incoming message", e);
+            _onMessage(buffer);
+        } catch (InvalidProtocolBufferException e) {
+            logger.log(SEVERE, "failed to parse incoming message", e);
+        } catch (IllegalArgumentException e) {
+            logger.log(SEVERE, "invalid field in incoming message", e);
+        } catch (TimeoutException e) {
+            logger.log(SEVERE, "publish timeout while processing incoming message", e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
+    }
+
+    private void _onMessage(ByteBuffer buffer)
+            throws InvalidProtocolBufferException, TimeoutException, InterruptedException {
+        byte[] bytes = new byte[buffer.remaining()];
+        buffer.get(bytes);
+        SapientMessage message = SapientMessage.parseFrom(bytes);
+        UUID destinationId = UUID.fromString(message.getDestinationId());
+        var typeAndNodeId = new Object[] {message.getContentCase(), destinationId};
+        logger.log(INFO, "received {0} for node: {1}", typeAndNodeId);
+        NodeWrapper node = nodes.get(destinationId);
+        switch (message.getContentCase()) {
+            case REGISTRATION_ACK -> {
+                if (node == null) {
+                    logger.log(SEVERE, "no node registered for destination: {0}", destinationId);
+                    return;
+                }
+                if (message.getRegistrationAck().getAcceptance()) {
+                    node.fusionNodeId.set(UUID.fromString(message.getNodeId()));
+                }
+                if (!node.ackQueue.offer(message.getRegistrationAck())) {
+                    logger.log(SEVERE, "ack queue full, dropping ack for node: {0}", destinationId);
+                }
+            }
+            case ALERT_ACK -> {
+                if (node == null) {
+                    logger.log(SEVERE, "no node registered for destination: {0}", destinationId);
+                    return;
+                }
+                node.node.onAlertAck(message.getAlertAck());
+            }
+            case TASK -> handleTask(message.getTask(), destinationId, message.getNodeId(), node);
+            default -> {}
+        }
+    }
+
+    private void handleTask(Task task, UUID nodeId, String senderNodeId, NodeWrapper node)
+            throws TimeoutException, InterruptedException {
+        if (node == null) {
+            rejectTask(task, nodeId, senderNodeId, "node not registered: " + nodeId);
+            return;
+        }
+        if (isRegistrationRequest(task)) {
+            if (node.node.isOnline()) sendRegistration(node);
+            else rejectTask(task, nodeId, senderNodeId, "node offline");
+            return;
+        }
+        node.node.onTask(task);
+    }
+
+    private void rejectTask(Task task, UUID nodeId, String destination, String reason)
+            throws TimeoutException, InterruptedException {
+        TaskAck rejected =
+                TaskAck.newBuilder()
+                        .setTaskId(task.getTaskId())
+                        .setTaskStatus(TaskAck.TaskStatus.TASK_STATUS_REJECTED)
+                        .addReason(reason)
+                        .build();
+        publish(
+                SapientMessage.newBuilder().setDestinationId(destination).setTaskAck(rejected),
+                nodeId,
+                config.publishTimeout());
+    }
+
+    private static boolean isRegistrationRequest(Task task) {
+        return task.hasCommand()
+                && task.getCommand().getCommandCase() == Task.Command.CommandCase.REQUEST
+                && "registration".equalsIgnoreCase(task.getCommand().getRequest());
+    }
+
+    private void sendRegistration(NodeWrapper node) throws TimeoutException, InterruptedException {
+        publish(node.node.getRegistration(), node.node.getNodeId(), config.publishTimeout());
     }
 
     @Override
     public void register(INode node) {
-        logger.log(Level.INFO, "registering the node: " + node.getNodeId());
+        logger.log(INFO, "registering the node: " + node.getNodeId());
         nodes.computeIfAbsent(node.getNodeId(), k -> new NodeWrapper(node, this, config));
     }
 
     @Override
     public void unregister(INode node) {
-        logger.log(Level.INFO, "unregistering the node: " + node.getNodeId());
+        logger.log(INFO, "unregistering the node: " + node.getNodeId());
 
         NodeWrapper wrapper = nodes.remove(node.getNodeId());
         if (wrapper == null) return;
@@ -105,10 +159,10 @@ public class NodeDispatcher implements INodeDispatcher {
         if (!wrapper.registered.getAndSet(false)) return;
 
         try {
-            logger.log(Level.INFO, "sending goodbye for the node: " + node.getNodeId());
+            logger.log(INFO, "sending goodbye for the node: " + node.getNodeId());
             goodbye(node.getNodeId(), config.publishTimeout());
         } catch (TimeoutException | InterruptedException e) {
-            logger.log(Level.SEVERE, "failed to send goodbye for the node: " + node.getNodeId(), e);
+            logger.log(SEVERE, "failed to send goodbye for the node: " + node.getNodeId(), e);
         }
     }
 
@@ -183,7 +237,7 @@ public class NodeDispatcher implements INodeDispatcher {
         try {
             client.close();
         } catch (Exception e) {
-            logger.log(Level.SEVERE, "failed to close client", e);
+            logger.log(SEVERE, "failed to close client", e);
         }
     }
 

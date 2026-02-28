@@ -28,6 +28,7 @@ import uk.gov.dstl.sapientmsg.bsiflex335v2.RegistrationAck;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Task;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.TaskAck;
 
 @Execution(ExecutionMode.CONCURRENT)
 class NodeDispatcherTest {
@@ -64,6 +65,19 @@ class NodeDispatcherTest {
     }
 
     static final UUID FUSION_NODE_ID = UUID.randomUUID();
+
+    static void sendRegistrationTask(Consumer<ByteBuffer> onMessage, UUID nodeId) {
+        SapientMessage msg =
+                SapientMessage.newBuilder()
+                        .setDestinationId(nodeId.toString())
+                        .setTask(
+                                Task.newBuilder()
+                                        .setCommand(
+                                                Task.Command.newBuilder()
+                                                        .setRequest("registration")))
+                        .build();
+        onMessage.accept(ByteBuffer.wrap(msg.toByteArray()));
+    }
 
     static void sendAck(Consumer<ByteBuffer> onMessage, UUID nodeId, boolean accepted) {
         SapientMessage msg =
@@ -393,6 +407,15 @@ class NodeDispatcherTest {
         }
     }
 
+    static void sendTask(Consumer<ByteBuffer> onMessage, UUID nodeId, Task task) {
+        SapientMessage msg =
+                SapientMessage.newBuilder()
+                        .setDestinationId(nodeId.toString())
+                        .setTask(task)
+                        .build();
+        onMessage.accept(ByteBuffer.wrap(msg.toByteArray()));
+    }
+
     @Test
     @Timeout(3)
     void taskDeliveredToNode() throws Exception {
@@ -400,15 +423,72 @@ class NodeDispatcherTest {
             s.online.set(true);
             s.dispatcher.register(s.node);
 
-            Task task = Task.newBuilder().setTaskId("task-1").build();
-            SapientMessage msg =
-                    SapientMessage.newBuilder()
-                            .setDestinationId(s.nodeId.toString())
-                            .setTask(task)
-                            .build();
-            s.onMessage.accept(ByteBuffer.wrap(msg.toByteArray()));
+            sendTask(s.onMessage, s.nodeId, Task.newBuilder().setTaskId("task-1").build());
 
             verify(s.node, timeout(1000)).onTask(argThat(t -> "task-1".equals(t.getTaskId())));
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void nonRegistrationRequestTaskPassedToNode() {
+        try (var s = setup(200)) {
+            s.dispatcher.register(s.node);
+
+            sendTask(
+                    s.onMessage,
+                    s.nodeId,
+                    Task.newBuilder()
+                            .setTaskId("task-1")
+                            .setCommand(Task.Command.newBuilder().setRequest("status"))
+                            .build());
+
+            verify(s.node).onTask(argThat(t -> "task-1".equals(t.getTaskId())));
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void registrationRequestCaseInsensitiveNotPassedToNode() {
+        try (var s = setup(200)) {
+            s.dispatcher.register(s.node);
+
+            sendTask(
+                    s.onMessage,
+                    s.nodeId,
+                    Task.newBuilder()
+                            .setCommand(Task.Command.newBuilder().setRequest("REGISTRATION"))
+                            .build());
+
+            verify(s.node, never()).onTask(any());
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void taskForUnknownNodeIsRejected() throws Exception {
+        UUID unknownNodeId = UUID.randomUUID();
+        UUID fusionNodeId = UUID.randomUUID();
+        IClient client = mock(IClient.class);
+        try (var dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults())) {
+            Consumer<ByteBuffer> onMessage = captureSubscription(client);
+
+            SapientMessage inbound =
+                    SapientMessage.newBuilder()
+                            .setNodeId(fusionNodeId.toString())
+                            .setDestinationId(unknownNodeId.toString())
+                            .setTask(Task.newBuilder().setTaskId("task-1"))
+                            .build();
+            onMessage.accept(ByteBuffer.wrap(inbound.toByteArray()));
+
+            SapientMessage sent = capturePublished(client);
+            assertEquals(SapientMessage.ContentCase.TASK_ACK, sent.getContentCase());
+            assertEquals(
+                    TaskAck.TaskStatus.TASK_STATUS_REJECTED, sent.getTaskAck().getTaskStatus());
+            assertEquals("task-1", sent.getTaskAck().getTaskId());
+            assertFalse(sent.getTaskAck().getReasonList().isEmpty());
+            assertEquals(fusionNodeId.toString(), sent.getDestinationId());
+            assertEquals(unknownNodeId.toString(), sent.getNodeId());
         }
     }
 
@@ -694,6 +774,64 @@ class NodeDispatcherTest {
             verify(s.dispatcher, timeout(2000))
                     .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
         }
+    }
+
+    @Test
+    @Timeout(3)
+    void registrationTaskResendsRegistrationWhenOnline() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+            sendAck(s.onMessage, s.nodeId, true);
+
+            sendRegistrationTask(s.onMessage, s.nodeId);
+
+            // _run() calls getRegistration() once; handleTask() calls it a second time
+            verify(s.node, timeout(1000).atLeast(2)).getRegistration();
+            // dispatcher consumed the task — node must not receive it via onTask
+            verify(s.node, never()).onTask(any());
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void registrationTaskSendsRejectedAckWhenOffline() throws Exception {
+        UUID nodeId = UUID.randomUUID();
+        IClient client = mock(IClient.class);
+        INode node = mockNode(nodeId, new AtomicBoolean(false), 200);
+        NodeDispatcher dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults());
+        dispatcher.register(node);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Consumer<ByteBuffer>> subCaptor = ArgumentCaptor.forClass(Consumer.class);
+        verify(client).subscribe(subCaptor.capture());
+
+        Task task =
+                Task.newBuilder()
+                        .setTaskId("task-1")
+                        .setCommand(Task.Command.newBuilder().setRequest("registration"))
+                        .build();
+        subCaptor
+                .getValue()
+                .accept(
+                        ByteBuffer.wrap(
+                                SapientMessage.newBuilder()
+                                        .setDestinationId(nodeId.toString())
+                                        .setTask(task)
+                                        .build()
+                                        .toByteArray()));
+
+        ArgumentCaptor<ByteBuffer> publishCaptor = ArgumentCaptor.forClass(ByteBuffer.class);
+        verify(client, timeout(1000)).publish(publishCaptor.capture(), any(Duration.class));
+        SapientMessage sent = SapientMessage.parseFrom(publishCaptor.getValue().array());
+        assertEquals(SapientMessage.ContentCase.TASK_ACK, sent.getContentCase());
+        assertEquals(TaskAck.TaskStatus.TASK_STATUS_REJECTED, sent.getTaskAck().getTaskStatus());
+        assertEquals("task-1", sent.getTaskAck().getTaskId());
+
+        dispatcher.close();
     }
 
     @Test
