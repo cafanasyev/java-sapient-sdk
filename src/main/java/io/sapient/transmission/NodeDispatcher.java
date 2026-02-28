@@ -87,19 +87,19 @@ public class NodeDispatcher implements INodeDispatcher {
 
     @Override
     public void unregister(INode node) {
+        logger.log(Level.INFO, "unregistering the node: " + node.getNodeId());
+
         NodeWrapper wrapper = nodes.remove(node.getNodeId());
-        if (wrapper != null) {
-            wrapper.close();
-            if (wrapper.registered.getAndSet(false)) {
-                try {
-                    goodbye(node.getNodeId(), config.publishTimeout());
-                } catch (TimeoutException | InterruptedException e) {
-                    logger.log(
-                            Level.SEVERE,
-                            "failed to send goodbye for the node: " + node.getNodeId(),
-                            e);
-                }
-            }
+        if (wrapper == null) return;
+
+        wrapper.close();
+        if (!wrapper.registered.getAndSet(false)) return;
+
+        try {
+            logger.log(Level.INFO, "sending goodbye for the node: " + node.getNodeId());
+            goodbye(node.getNodeId(), config.publishTimeout());
+        } catch (TimeoutException | InterruptedException e) {
+            logger.log(Level.SEVERE, "failed to send goodbye for the node: " + node.getNodeId(), e);
         }
     }
 
