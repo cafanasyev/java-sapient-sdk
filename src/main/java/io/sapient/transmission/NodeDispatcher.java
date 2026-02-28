@@ -55,27 +55,25 @@ public class NodeDispatcher implements INodeDispatcher {
             buffer.get(bytes);
             SapientMessage message = SapientMessage.parseFrom(bytes);
 
-            if (message.getContentCase() == SapientMessage.ContentCase.REGISTRATION_ACK) {
-                UUID destinationId = UUID.fromString(message.getDestinationId());
-                NodeWrapper node = nodes.get(destinationId);
-                if (node != null && !node.ackQueue.offer(message.getRegistrationAck())) {
-                    logger.log(
-                            Level.WARNING,
-                            "ack queue full, dropping ack for node: {0}",
-                            destinationId);
+            UUID destinationId = UUID.fromString(message.getDestinationId());
+            NodeWrapper node = nodes.get(destinationId);
+            if (node == null) {
+                logger.log(Level.SEVERE, "no node registered for destination: {0}", destinationId);
+                return;
+            }
+
+            switch (message.getContentCase()) {
+                case REGISTRATION_ACK -> {
+                    if (!node.ackQueue.offer(message.getRegistrationAck())) {
+                        logger.log(
+                                Level.SEVERE,
+                                "ack queue full, dropping ack for node: {0}",
+                                destinationId);
+                    }
                 }
-            } else if (message.getContentCase() == SapientMessage.ContentCase.ALERT_ACK) {
-                UUID destinationId = UUID.fromString(message.getDestinationId());
-                NodeWrapper node = nodes.get(destinationId);
-                if (node != null) {
-                    node.node.onAlertAck(message.getAlertAck());
-                }
-            } else if (message.getContentCase() == SapientMessage.ContentCase.TASK) {
-                UUID destinationId = UUID.fromString(message.getDestinationId());
-                NodeWrapper node = nodes.get(destinationId);
-                if (node != null) {
-                    node.node.onTask(message.getTask());
-                }
+                case ALERT_ACK -> node.node.onAlertAck(message.getAlertAck());
+                case TASK -> node.node.onTask(message.getTask());
+                default -> {}
             }
         } catch (Exception e) {
             logger.log(Level.SEVERE, "failed to process incoming message", e);
