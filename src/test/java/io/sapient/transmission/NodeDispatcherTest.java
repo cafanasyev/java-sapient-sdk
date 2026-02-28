@@ -2,6 +2,7 @@ package io.sapient.transmission;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
@@ -61,9 +62,12 @@ class NodeDispatcherTest {
                 .build();
     }
 
+    static final UUID FUSION_NODE_ID = UUID.randomUUID();
+
     static void sendAck(Consumer<ByteBuffer> onMessage, UUID nodeId, boolean accepted) {
         SapientMessage msg =
                 SapientMessage.newBuilder()
+                        .setNodeId(FUSION_NODE_ID.toString())
                         .setDestinationId(nodeId.toString())
                         .setRegistrationAck(RegistrationAck.newBuilder().setAcceptance(accepted))
                         .build();
@@ -125,6 +129,54 @@ class NodeDispatcherTest {
             sendAck(s.onMessage, s.nodeId, true);
             verify(s.node, timeout(1000))
                     .onRegistrationAck(argThat(RegistrationAck::getAcceptance));
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void fusionNodeIdNullBeforeAck() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+
+            assertNull(s.dispatcher.nodes.get(s.nodeId).fusionNodeId.get());
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void fusionNodeIdNotSetAfterAcceptAck() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+
+            sendAck(s.onMessage, s.nodeId, true);
+            verify(s.node, timeout(1000)).onRegistrationAck(any());
+
+            assertEquals(FUSION_NODE_ID, s.dispatcher.nodes.get(s.nodeId).fusionNodeId.get());
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void fusionNodeIdNotSetAfterRejectedAck() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+
+            sendAck(s.onMessage, s.nodeId, false);
+            verify(s.node, timeout(1000)).onRegistrationAck(any());
+
+            assertNull(s.dispatcher.nodes.get(s.nodeId).fusionNodeId.get());
         }
     }
 
@@ -411,6 +463,40 @@ class NodeDispatcherTest {
         assertEquals(SapientMessage.ContentCase.CONTENT_NOT_SET, msg.getContentCase());
         assertEquals(nodeId.toString(), msg.getNodeId());
         assertRecentTimestamp(msg, before);
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void publishSetsDestinationIdWhenFusionNodeIdKnown() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults());
+        UUID nodeId = UUID.randomUUID();
+        UUID fusionId = UUID.randomUUID();
+
+        dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
+        dispatcher.nodes.get(nodeId).fusionNodeId.set(fusionId);
+
+        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(fusionId.toString(), msg.getDestinationId());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void publishOmitsDestinationIdWhenFusionNodeIdUnknown() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults());
+        UUID nodeId = UUID.randomUUID();
+
+        dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
+
+        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals("", msg.getDestinationId());
         dispatcher.close();
     }
 

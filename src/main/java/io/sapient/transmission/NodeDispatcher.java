@@ -36,7 +36,7 @@ public class NodeDispatcher implements INodeDispatcher {
     @NonNull private final IClient client;
     @NonNull private final NodeDispatcherConfig config;
 
-    private final ConcurrentMap<UUID, NodeWrapper> nodes = new ConcurrentHashMap<>();
+    final ConcurrentMap<UUID, NodeWrapper> nodes = new ConcurrentHashMap<>();
 
     /**
      * Creates a dispatcher backed by the given client and configuration.
@@ -56,8 +56,11 @@ public class NodeDispatcher implements INodeDispatcher {
             byte[] bytes = new byte[buffer.remaining()];
             buffer.get(bytes);
             SapientMessage message = SapientMessage.parseFrom(bytes);
-
             UUID destinationId = UUID.fromString(message.getDestinationId());
+            logger.log(
+                    Level.INFO,
+                    "received {0} for node: {1}",
+                    new Object[] {message.getContentCase(), destinationId});
             NodeWrapper node = nodes.get(destinationId);
             if (node == null) {
                 logger.log(Level.SEVERE, "no node registered for destination: {0}", destinationId);
@@ -66,6 +69,9 @@ public class NodeDispatcher implements INodeDispatcher {
 
             switch (message.getContentCase()) {
                 case REGISTRATION_ACK -> {
+                    if (message.getRegistrationAck().getAcceptance()) {
+                        node.fusionNodeId.set(UUID.fromString(message.getNodeId()));
+                    }
                     if (!node.ackQueue.offer(message.getRegistrationAck())) {
                         logger.log(
                                 Level.SEVERE,
@@ -84,6 +90,7 @@ public class NodeDispatcher implements INodeDispatcher {
 
     @Override
     public void register(INode node) {
+        logger.log(Level.INFO, "registering the node: " + node.getNodeId());
         nodes.computeIfAbsent(node.getNodeId(), k -> new NodeWrapper(node, this, config));
     }
 
@@ -137,9 +144,15 @@ public class NodeDispatcher implements INodeDispatcher {
 
     private void publish(SapientMessage.Builder builder, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        SapientMessage message =
-                builder.setNodeId(nodeId.toString()).setTimestamp(timestampNow()).build();
-        client.publish(ByteBuffer.wrap(message.toByteArray()), timeout);
+        builder.setNodeId(nodeId.toString()).setTimestamp(timestampNow());
+        NodeWrapper node = nodes.get(nodeId);
+        if (node != null) {
+            UUID fusionNodeId = node.fusionNodeId.get();
+            if (fusionNodeId != null) {
+                builder.setDestinationId(fusionNodeId.toString());
+            }
+        }
+        client.publish(ByteBuffer.wrap(builder.build().toByteArray()), timeout);
     }
 
     private static Timestamp timestampNow() {

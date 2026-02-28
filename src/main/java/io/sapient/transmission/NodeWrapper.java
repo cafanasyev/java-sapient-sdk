@@ -1,10 +1,12 @@
 package io.sapient.transmission;
 
 import java.time.Duration;
+import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import lombok.NonNull;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.RegistrationAck;
@@ -12,6 +14,7 @@ import uk.gov.dstl.sapientmsg.bsiflex335v2.RegistrationAck;
 class NodeWrapper implements AutoCloseable {
     @NonNull final INode node;
     final AtomicBoolean registered = new AtomicBoolean(false);
+    final AtomicReference<UUID> fusionNodeId = new AtomicReference<>();
     final BlockingQueue<RegistrationAck> ackQueue = new ArrayBlockingQueue<>(1);
 
     private final INodeDispatcher dispatcher;
