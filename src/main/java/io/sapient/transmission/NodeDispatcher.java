@@ -2,6 +2,7 @@ package io.sapient.transmission;
 
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Timestamp;
+import com.google.protobuf.util.JsonFormat;
 import io.sapient.transport.IClient;
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -239,7 +240,20 @@ public class NodeDispatcher implements INodeDispatcher {
         if (destinationId != null) {
             builder.setDestinationId(destinationId.toString());
         }
-        client.publish(ByteBuffer.wrap(builder.build().toByteArray()), timeout);
+        SapientMessage message = builder.build();
+        log.info(
+                "sending {} nodeId={} destinationId={}",
+                message.getContentCase(),
+                nodeId,
+                destinationId);
+        if (log.isDebugEnabled()) {
+            try {
+                log.debug("message: {}", JsonFormat.printer().print(message));
+            } catch (InvalidProtocolBufferException e) {
+                log.debug("message: <serialization failed>", e);
+            }
+        }
+        client.publish(ByteBuffer.wrap(message.toByteArray()), timeout);
     }
 
     private static Timestamp timestampNow() {
