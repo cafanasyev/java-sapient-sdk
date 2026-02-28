@@ -53,7 +53,8 @@ class NodeWrapper implements AutoCloseable {
         waitUntilOnline();
 
         Registration registration = node.getRegistration();
-        dispatcher.publish(registration, node.getNodeId(), config.publishTimeout());
+        dispatcher.publish(
+                registration, node.getNodeId(), fusionNodeId.get(), config.publishTimeout());
 
         RegistrationAck ack = ackQueue.take();
         node.onRegistrationAck(ack);
@@ -65,7 +66,10 @@ class NodeWrapper implements AutoCloseable {
         while (!Thread.currentThread().isInterrupted() && node.isOnline()) {
             try {
                 dispatcher.publish(
-                        node.getStatusReport(), node.getNodeId(), config.publishTimeout());
+                        node.getStatusReport(),
+                        node.getNodeId(),
+                        fusionNodeId.get(),
+                        config.publishTimeout());
             } catch (TimeoutException e) {
                 log.error("status report publish timeout for node: {}", node.getNodeId(), e);
             }
@@ -74,7 +78,7 @@ class NodeWrapper implements AutoCloseable {
 
         if (!Thread.currentThread().isInterrupted()) {
             try {
-                dispatcher.goodbye(node.getNodeId(), config.publishTimeout());
+                dispatcher.goodbye(node.getNodeId(), fusionNodeId.get(), config.publishTimeout());
             } catch (TimeoutException e) {
                 log.error("goodbye publish timeout for node: {}", node.getNodeId(), e);
             }

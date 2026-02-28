@@ -127,7 +127,7 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
         }
     }
 
@@ -139,7 +139,7 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             sendAck(s.onMessage, s.nodeId, true);
             verify(s.node, timeout(1000))
@@ -155,7 +155,7 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             assertNull(s.dispatcher.nodes.get(s.nodeId).getFusionNodeId().get());
         }
@@ -169,7 +169,7 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             sendAck(s.onMessage, s.nodeId, true);
             verify(s.node, timeout(1000)).onRegistrationAck(any());
@@ -186,7 +186,7 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             sendAck(s.onMessage, s.nodeId, false);
             verify(s.node, timeout(1000)).onRegistrationAck(any());
@@ -203,12 +203,12 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             sendAck(s.onMessage, s.nodeId, true);
 
             verify(s.dispatcher, timeout(1000).atLeast(2))
-                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(), any(Duration.class));
         }
     }
 
@@ -220,12 +220,12 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             Thread.sleep(200);
 
             verify(s.dispatcher, never())
-                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(), any(Duration.class));
         }
     }
 
@@ -237,11 +237,11 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
             sendAck(s.onMessage, s.nodeId, false);
 
             verify(s.dispatcher, timeout(1000).atLeast(2))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
         }
     }
 
@@ -253,16 +253,16 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             sendAck(s.onMessage, s.nodeId, true);
 
             verify(s.dispatcher, timeout(1000).atLeastOnce())
-                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(), any(Duration.class));
 
             s.online.set(false);
 
-            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
+            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(), any(Duration.class));
         }
     }
 
@@ -274,16 +274,16 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             sendAck(s.onMessage, s.nodeId, true);
 
             verify(s.dispatcher, timeout(1000).atLeastOnce())
-                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(), any(Duration.class));
 
             s.online.set(false);
 
-            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
+            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(), any(Duration.class));
             Thread.sleep(50);
 
             assertNull(s.dispatcher.nodes.get(s.nodeId).getFusionNodeId().get());
@@ -298,16 +298,16 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             sendAck(s.onMessage, s.nodeId, true);
 
             verify(s.dispatcher, timeout(1000).atLeastOnce())
-                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(), any(Duration.class));
 
             s.online.set(false);
 
-            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
+            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(), any(Duration.class));
             Thread.sleep(50);
 
             assertNull(s.dispatcher.nodes.get(s.nodeId).getLastStatusReport().get());
@@ -323,28 +323,28 @@ class NodeDispatcherTest {
 
             // first registration
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             sendAck(s.onMessage, s.nodeId, true);
 
             verify(s.dispatcher, timeout(1000).atLeastOnce())
-                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(), any(Duration.class));
 
             // go offline, then online
             s.online.set(false);
 
-            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
+            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(), any(Duration.class));
 
             s.online.set(true);
 
             // second registration
             verify(s.dispatcher, timeout(1000).atLeast(2))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             sendAck(s.onMessage, s.nodeId, true);
 
             verify(s.dispatcher, timeout(1000).atLeast(2))
-                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(), any(Duration.class));
         }
     }
 
@@ -356,7 +356,7 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             sendAck(s.onMessage, s.nodeId, true);
 
@@ -364,7 +364,7 @@ class NodeDispatcherTest {
 
             s.dispatcher.unregister(s.node);
 
-            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
+            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(), any(Duration.class));
         }
     }
 
@@ -376,14 +376,14 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             // no ack sent — node not registered yet
             s.dispatcher.unregister(s.node);
 
             Thread.sleep(100);
 
-            verify(s.dispatcher, never()).goodbye(any(), any(Duration.class));
+            verify(s.dispatcher, never()).goodbye(any(), any(), any(Duration.class));
         }
     }
 
@@ -518,7 +518,7 @@ class NodeDispatcherTest {
         UUID nodeId = UUID.randomUUID();
 
         Instant before = Instant.now();
-        dispatcher.publish(Registration.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(Registration.getDefaultInstance(), nodeId, null, Duration.ofSeconds(1));
 
         SapientMessage msg = capturePublished(client);
         assertEquals(SapientMessage.ContentCase.REGISTRATION, msg.getContentCase());
@@ -535,7 +535,7 @@ class NodeDispatcherTest {
         UUID nodeId = UUID.randomUUID();
 
         Instant before = Instant.now();
-        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, null, Duration.ofSeconds(1));
 
         SapientMessage msg = capturePublished(client);
         assertEquals(SapientMessage.ContentCase.STATUS_REPORT, msg.getContentCase());
@@ -552,7 +552,7 @@ class NodeDispatcherTest {
         UUID nodeId = UUID.randomUUID();
 
         Instant before = Instant.now();
-        dispatcher.publish(Alert.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(Alert.getDefaultInstance(), nodeId, null, Duration.ofSeconds(1));
 
         SapientMessage msg = capturePublished(client);
         assertEquals(SapientMessage.ContentCase.ALERT, msg.getContentCase());
@@ -569,7 +569,8 @@ class NodeDispatcherTest {
         UUID nodeId = UUID.randomUUID();
 
         Instant before = Instant.now();
-        dispatcher.publish(DetectionReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(
+                DetectionReport.getDefaultInstance(), nodeId, null, Duration.ofSeconds(1));
 
         SapientMessage msg = capturePublished(client);
         assertEquals(SapientMessage.ContentCase.DETECTION_REPORT, msg.getContentCase());
@@ -586,7 +587,7 @@ class NodeDispatcherTest {
         UUID nodeId = UUID.randomUUID();
 
         Instant before = Instant.now();
-        dispatcher.goodbye(nodeId, Duration.ofSeconds(1));
+        dispatcher.goodbye(nodeId, null, Duration.ofSeconds(1));
 
         SapientMessage msg = capturePublished(client);
         assertEquals(SapientMessage.ContentCase.CONTENT_NOT_SET, msg.getContentCase());
@@ -604,9 +605,9 @@ class NodeDispatcherTest {
         UUID fusionId = UUID.randomUUID();
 
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
-        dispatcher.nodes.get(nodeId).getFusionNodeId().set(fusionId);
 
-        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(
+                StatusReport.getDefaultInstance(), nodeId, fusionId, Duration.ofSeconds(1));
 
         SapientMessage msg = capturePublished(client);
         assertEquals(fusionId.toString(), msg.getDestinationId());
@@ -622,7 +623,7 @@ class NodeDispatcherTest {
 
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
-        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, null, Duration.ofSeconds(1));
 
         SapientMessage msg = capturePublished(client);
         assertEquals("", msg.getDestinationId());
@@ -637,7 +638,7 @@ class NodeDispatcherTest {
         UUID nodeId = UUID.randomUUID();
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
-        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, null, Duration.ofSeconds(1));
 
         SapientMessage msg = capturePublished(client);
         assertEquals(StatusReport.Info.INFO_NEW, msg.getStatusReport().getInfo());
@@ -653,8 +654,8 @@ class NodeDispatcherTest {
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
         StatusReport report = StatusReport.newBuilder().setMode("patrol").build();
-        dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
-        dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(report, nodeId, null, Duration.ofSeconds(1));
+        dispatcher.publish(report, nodeId, null, Duration.ofSeconds(1));
 
         ArgumentCaptor<ByteBuffer> captor = ArgumentCaptor.forClass(ByteBuffer.class);
         verify(client, times(2)).publish(captor.capture(), any(Duration.class));
@@ -672,9 +673,15 @@ class NodeDispatcherTest {
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
         dispatcher.publish(
-                StatusReport.newBuilder().setMode("patrol").build(), nodeId, Duration.ofSeconds(1));
+                StatusReport.newBuilder().setMode("patrol").build(),
+                nodeId,
+                null,
+                Duration.ofSeconds(1));
         dispatcher.publish(
-                StatusReport.newBuilder().setMode("alert").build(), nodeId, Duration.ofSeconds(1));
+                StatusReport.newBuilder().setMode("alert").build(),
+                nodeId,
+                null,
+                Duration.ofSeconds(1));
 
         ArgumentCaptor<ByteBuffer> captor = ArgumentCaptor.forClass(ByteBuffer.class);
         verify(client, times(2)).publish(captor.capture(), any(Duration.class));
@@ -693,13 +700,13 @@ class NodeDispatcherTest {
             doThrow(new TimeoutException("test timeout"))
                     .doCallRealMethod()
                     .when(s.dispatcher)
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             s.dispatcher.register(s.node);
 
             // should retry and publish registration at least twice
             verify(s.dispatcher, timeout(2000).atLeast(2))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
         }
     }
 
@@ -713,22 +720,22 @@ class NodeDispatcherTest {
             doThrow(new TimeoutException("test timeout"))
                     .doCallRealMethod()
                     .when(s.dispatcher)
-                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(), any(Duration.class));
 
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             sendAck(s.onMessage, s.nodeId, true);
 
             // wait for at least 2 status report attempts (first throws, second succeeds)
             verify(s.dispatcher, timeout(1000).atLeast(2))
-                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(), any(Duration.class));
 
             // registration must have been sent exactly once — no re-registration triggered
             verify(s.dispatcher, times(1))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
         }
     }
 
@@ -742,18 +749,18 @@ class NodeDispatcherTest {
             doThrow(new TimeoutException("test timeout"))
                     .doCallRealMethod()
                     .when(s.dispatcher)
-                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(), any(Duration.class));
 
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
 
             sendAck(s.onMessage, s.nodeId, true);
 
             // loop must continue — at least 2 status reports sent despite the first timing out
             verify(s.dispatcher, timeout(1000).atLeast(2))
-                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(), any(Duration.class));
         }
     }
 
@@ -772,7 +779,7 @@ class NodeDispatcherTest {
 
             // should retry and publish registration successfully
             verify(s.dispatcher, timeout(2000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
         }
     }
 
@@ -784,7 +791,7 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+                    .publish(any(Registration.class), eq(s.nodeId), any(), any(Duration.class));
             sendAck(s.onMessage, s.nodeId, true);
 
             sendRegistrationTask(s.onMessage, s.nodeId);

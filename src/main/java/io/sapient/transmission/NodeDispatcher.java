@@ -70,6 +70,7 @@ public class NodeDispatcher implements INodeDispatcher {
         UUID destinationId = UUID.fromString(message.getDestinationId());
         log.info("received {} for node: {}", message.getContentCase(), destinationId);
         NodeWrapper node = nodes.get(destinationId);
+        UUID senderId = message.getNodeId().isEmpty() ? null : UUID.fromString(message.getNodeId());
         switch (message.getContentCase()) {
             case REGISTRATION_ACK -> {
                 if (node == null) {
@@ -90,15 +91,15 @@ public class NodeDispatcher implements INodeDispatcher {
                 }
                 node.getNode().onAlertAck(message.getAlertAck());
             }
-            case TASK -> handleTask(message.getTask(), destinationId, message.getNodeId(), node);
+            case TASK -> handleTask(message.getTask(), destinationId, senderId, node);
             default -> {}
         }
     }
 
-    private void handleTask(Task task, UUID nodeId, String senderNodeId, NodeWrapper nodeWrapper)
+    private void handleTask(Task task, UUID nodeId, UUID senderId, NodeWrapper nodeWrapper)
             throws TimeoutException, InterruptedException {
         if (nodeWrapper == null) {
-            rejectTask(task, nodeId, senderNodeId, "node not registered: " + nodeId);
+            rejectTask(task, nodeId, senderId, "node not registered: " + nodeId);
             return;
         }
 
@@ -106,9 +107,13 @@ public class NodeDispatcher implements INodeDispatcher {
 
         if (isRegistrationRequest(task)) {
             if (node.isOnline()) {
-                publish(node.getRegistration(), node.getNodeId(), config.publishTimeout());
+                publish(
+                        node.getRegistration(),
+                        node.getNodeId(),
+                        nodeWrapper.getFusionNodeId().get(),
+                        config.publishTimeout());
             } else {
-                rejectTask(task, nodeId, senderNodeId, "node offline");
+                rejectTask(task, nodeId, senderId, "node offline");
             }
             return;
         }
@@ -116,7 +121,7 @@ public class NodeDispatcher implements INodeDispatcher {
         node.onTask(task);
     }
 
-    private void rejectTask(Task task, UUID nodeId, String destination, String reason)
+    private void rejectTask(Task task, UUID nodeId, UUID destinationId, String reason)
             throws TimeoutException, InterruptedException {
         log.warn(
                 "rejecting task {} [command={}, request={}] for node {}: {}",
@@ -131,10 +136,7 @@ public class NodeDispatcher implements INodeDispatcher {
                         .setTaskStatus(TaskAck.TaskStatus.TASK_STATUS_REJECTED)
                         .addReason(reason)
                         .build();
-        publish(
-                SapientMessage.newBuilder().setDestinationId(destination).setTaskAck(reject),
-                nodeId,
-                config.publishTimeout());
+        publish(reject, nodeId, destinationId, config.publishTimeout());
     }
 
     private static boolean isRegistrationRequest(Task task) {
@@ -161,20 +163,25 @@ public class NodeDispatcher implements INodeDispatcher {
 
         try {
             log.info("sending goodbye for the node: {}", node.getNodeId());
-            goodbye(node.getNodeId(), config.publishTimeout());
+            goodbye(node.getNodeId(), wrapper.getFusionNodeId().get(), config.publishTimeout());
         } catch (TimeoutException | InterruptedException e) {
             log.error("failed to send goodbye for the node: {}", node.getNodeId(), e);
         }
     }
 
     @Override
-    public void publish(Registration registration, UUID nodeId, Duration timeout)
+    public void publish(
+            Registration registration, UUID nodeId, UUID destinationId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        publish(SapientMessage.newBuilder().setRegistration(registration), nodeId, timeout);
+        publish(
+                SapientMessage.newBuilder().setRegistration(registration),
+                nodeId,
+                destinationId,
+                timeout);
     }
 
     @Override
-    public void publish(StatusReport status, UUID nodeId, Duration timeout)
+    public void publish(StatusReport status, UUID nodeId, UUID destinationId, Duration timeout)
             throws TimeoutException, InterruptedException {
         NodeWrapper node = nodes.get(nodeId);
         StatusReport.Info info = StatusReport.Info.INFO_NEW;
@@ -185,7 +192,11 @@ public class NodeDispatcher implements INodeDispatcher {
             }
         }
         StatusReport withInfo = status.toBuilder().setInfo(info).build();
-        publish(SapientMessage.newBuilder().setStatusReport(withInfo), nodeId, timeout);
+        publish(
+                SapientMessage.newBuilder().setStatusReport(withInfo),
+                nodeId,
+                destinationId,
+                timeout);
     }
 
     private static StatusReport clearInfo(StatusReport status) {
@@ -193,32 +204,40 @@ public class NodeDispatcher implements INodeDispatcher {
     }
 
     @Override
-    public void publish(Alert alert, UUID nodeId, Duration timeout)
+    public void publish(TaskAck taskAck, UUID nodeId, UUID destinationId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        publish(SapientMessage.newBuilder().setAlert(alert), nodeId, timeout);
+        publish(SapientMessage.newBuilder().setTaskAck(taskAck), nodeId, destinationId, timeout);
     }
 
     @Override
-    public void publish(DetectionReport detection, UUID nodeId, Duration timeout)
+    public void publish(Alert alert, UUID nodeId, UUID destinationId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        publish(SapientMessage.newBuilder().setDetectionReport(detection), nodeId, timeout);
+        publish(SapientMessage.newBuilder().setAlert(alert), nodeId, destinationId, timeout);
     }
 
     @Override
-    public void goodbye(UUID nodeId, Duration timeout)
+    public void publish(
+            DetectionReport detection, UUID nodeId, UUID destinationId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        publish(SapientMessage.newBuilder(), nodeId, timeout);
+        publish(
+                SapientMessage.newBuilder().setDetectionReport(detection),
+                nodeId,
+                destinationId,
+                timeout);
     }
 
-    private void publish(SapientMessage.Builder builder, UUID nodeId, Duration timeout)
+    @Override
+    public void goodbye(UUID nodeId, UUID destinationId, Duration timeout)
+            throws TimeoutException, InterruptedException {
+        publish(SapientMessage.newBuilder(), nodeId, destinationId, timeout);
+    }
+
+    private void publish(
+            SapientMessage.Builder builder, UUID nodeId, UUID destinationId, Duration timeout)
             throws TimeoutException, InterruptedException {
         builder.setNodeId(nodeId.toString()).setTimestamp(timestampNow());
-        NodeWrapper node = nodes.get(nodeId);
-        if (node != null) {
-            UUID fusionNodeId = node.getFusionNodeId().get();
-            if (fusionNodeId != null) {
-                builder.setDestinationId(fusionNodeId.toString());
-            }
+        if (destinationId != null) {
+            builder.setDestinationId(destinationId.toString());
         }
         client.publish(ByteBuffer.wrap(builder.build().toByteArray()), timeout);
     }
