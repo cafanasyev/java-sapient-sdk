@@ -253,6 +253,54 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
+    void fusionNodeIdClearedAfterGoodbye() throws Exception {
+        try (var s = setup(50)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+
+            sendAck(s.onMessage, s.nodeId, true);
+
+            verify(s.dispatcher, timeout(1000).atLeastOnce())
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+
+            s.online.set(false);
+
+            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
+            Thread.sleep(50);
+
+            assertNull(s.dispatcher.nodes.get(s.nodeId).fusionNodeId.get());
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void lastStatusReportClearedAfterGoodbye() throws Exception {
+        try (var s = setup(50)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+
+            sendAck(s.onMessage, s.nodeId, true);
+
+            verify(s.dispatcher, timeout(1000).atLeastOnce())
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+
+            s.online.set(false);
+
+            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
+            Thread.sleep(50);
+
+            assertNull(s.dispatcher.nodes.get(s.nodeId).lastStatusReport.get());
+        }
+    }
+
+    @Test
+    @Timeout(3)
     void reRegistrationAfterOfflineOnline() throws Exception {
         try (var s = setup(50)) {
             s.online.set(true);

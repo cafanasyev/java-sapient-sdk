@@ -56,6 +56,8 @@ class NodeWrapper implements AutoCloseable {
                 if (!Thread.currentThread().isInterrupted()) {
                     dispatcher.goodbye(node.getNodeId(), config.publishTimeout());
                     registered.set(false);
+                    fusionNodeId.set(null);
+                    lastStatusReport.set(null);
                 }
             }
         } catch (InterruptedException e) {
