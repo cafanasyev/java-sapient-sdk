@@ -82,11 +82,7 @@ public class NodeDispatcher implements INodeDispatcher {
 
     @Override
     public void register(INode node) {
-        nodes.computeIfAbsent(
-                node.getNodeId(),
-                k ->
-                        new NodeWrapper(
-                                node, this, config.onlineCheckInterval(), config.publishTimeout()));
+        nodes.computeIfAbsent(node.getNodeId(), k -> new NodeWrapper(node, this, config));
     }
 
     @Override

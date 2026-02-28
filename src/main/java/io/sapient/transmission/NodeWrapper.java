@@ -15,19 +15,13 @@ class NodeWrapper implements AutoCloseable {
     final BlockingQueue<RegistrationAck> ackQueue = new ArrayBlockingQueue<>(1);
 
     private final INodeDispatcher dispatcher;
-    private final Duration onlineCheckInterval;
-    private final Duration publishTimeout;
+    private final NodeDispatcherConfig config;
     private final Thread thread;
 
-    NodeWrapper(
-            INode node,
-            INodeDispatcher dispatcher,
-            Duration onlineCheckInterval,
-            Duration publishTimeout) {
+    NodeWrapper(INode node, INodeDispatcher dispatcher, NodeDispatcherConfig config) {
         this.node = node;
         this.dispatcher = dispatcher;
-        this.onlineCheckInterval = onlineCheckInterval;
-        this.publishTimeout = publishTimeout;
+        this.config = config;
         this.thread = Thread.ofVirtual().name("node-" + node.getNodeId()).start(this::run);
     }
 
@@ -37,7 +31,7 @@ class NodeWrapper implements AutoCloseable {
                 waitUntilOnline();
 
                 Registration registration = node.getRegistration();
-                dispatcher.publish(registration, node.getNodeId(), publishTimeout);
+                dispatcher.publish(registration, node.getNodeId(), config.publishTimeout());
 
                 RegistrationAck ack = ackQueue.take();
                 node.onRegistrationAck(ack);
@@ -50,11 +44,12 @@ class NodeWrapper implements AutoCloseable {
                 while (!Thread.currentThread().isInterrupted()) {
                     Thread.sleep(interval);
                     if (!node.isOnline()) break;
-                    dispatcher.publish(node.getStatusReport(), node.getNodeId(), publishTimeout);
+                    dispatcher.publish(
+                            node.getStatusReport(), node.getNodeId(), config.publishTimeout());
                 }
 
                 if (!Thread.currentThread().isInterrupted()) {
-                    dispatcher.goodbye(node.getNodeId(), publishTimeout);
+                    dispatcher.goodbye(node.getNodeId(), config.publishTimeout());
                     registered.set(false);
                 }
             }
@@ -67,7 +62,7 @@ class NodeWrapper implements AutoCloseable {
 
     private void waitUntilOnline() throws InterruptedException {
         while (!Thread.currentThread().isInterrupted() && !node.isOnline()) {
-            Thread.sleep(onlineCheckInterval);
+            Thread.sleep(config.onlineCheckInterval());
         }
     }
 
