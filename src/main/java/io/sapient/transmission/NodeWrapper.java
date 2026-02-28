@@ -10,11 +10,13 @@ import java.util.concurrent.atomic.AtomicReference;
 import lombok.NonNull;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.RegistrationAck;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 
 class NodeWrapper implements AutoCloseable {
     @NonNull final INode node;
     final AtomicBoolean registered = new AtomicBoolean(false);
     final AtomicReference<UUID> fusionNodeId = new AtomicReference<>();
+    final AtomicReference<StatusReport> lastStatusReport = new AtomicReference<>();
     final BlockingQueue<RegistrationAck> ackQueue = new ArrayBlockingQueue<>(1);
 
     private final INodeDispatcher dispatcher;

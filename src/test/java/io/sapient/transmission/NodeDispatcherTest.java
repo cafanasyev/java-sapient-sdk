@@ -502,6 +502,60 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
+    void statusReportInfoNewOnFirstPublish() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults());
+        UUID nodeId = UUID.randomUUID();
+        dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
+
+        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(StatusReport.Info.INFO_NEW, msg.getStatusReport().getInfo());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void statusReportInfoUnchangedOnIdenticalPublish() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults());
+        UUID nodeId = UUID.randomUUID();
+        dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
+
+        StatusReport report = StatusReport.newBuilder().setMode("patrol").build();
+        dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
+
+        ArgumentCaptor<ByteBuffer> captor = ArgumentCaptor.forClass(ByteBuffer.class);
+        verify(client, times(2)).publish(captor.capture(), any(Duration.class));
+        SapientMessage second = SapientMessage.parseFrom(captor.getAllValues().get(1).array());
+        assertEquals(StatusReport.Info.INFO_UNCHANGED, second.getStatusReport().getInfo());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void statusReportInfoNewOnChangedPublish() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults());
+        UUID nodeId = UUID.randomUUID();
+        dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
+
+        dispatcher.publish(
+                StatusReport.newBuilder().setMode("patrol").build(), nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(
+                StatusReport.newBuilder().setMode("alert").build(), nodeId, Duration.ofSeconds(1));
+
+        ArgumentCaptor<ByteBuffer> captor = ArgumentCaptor.forClass(ByteBuffer.class);
+        verify(client, times(2)).publish(captor.capture(), any(Duration.class));
+        SapientMessage second = SapientMessage.parseFrom(captor.getAllValues().get(1).array());
+        assertEquals(StatusReport.Info.INFO_NEW, second.getStatusReport().getInfo());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
     void closeUnblocksRun() throws Exception {
         CountDownLatch running = new CountDownLatch(1);
         CountDownLatch stopped = new CountDownLatch(1);

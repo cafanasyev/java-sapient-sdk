@@ -41,9 +41,11 @@ public interface INodeDispatcher extends Runnable, AutoCloseable {
             throws TimeoutException, InterruptedException;
 
     /**
-     * Publishes a {@link StatusReport} message for the given node.
+     * Publishes a {@link StatusReport} message for the given node. The {@link StatusReport.Info}
+     * field is computed automatically by comparing the report with the previously published one —
+     * callers should not set it.
      *
-     * @param status the status report
+     * @param status the status report (the {@code info} field will be overwritten)
      * @param nodeId the source node identifier
      * @param timeout maximum time to wait
      * @throws TimeoutException if the operation exceeds the given timeout

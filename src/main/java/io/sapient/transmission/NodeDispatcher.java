@@ -121,7 +121,20 @@ public class NodeDispatcher implements INodeDispatcher {
     @Override
     public void publish(StatusReport status, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        publish(SapientMessage.newBuilder().setStatusReport(status), nodeId, timeout);
+        NodeWrapper node = nodes.get(nodeId);
+        StatusReport.Info info = StatusReport.Info.INFO_NEW;
+        if (node != null) {
+            StatusReport prev = node.lastStatusReport.getAndSet(status);
+            if (prev != null && clearInfo(prev).equals(clearInfo(status))) {
+                info = StatusReport.Info.INFO_UNCHANGED;
+            }
+        }
+        StatusReport withInfo = status.toBuilder().setInfo(info).build();
+        publish(SapientMessage.newBuilder().setStatusReport(withInfo), nodeId, timeout);
+    }
+
+    private static StatusReport clearInfo(StatusReport status) {
+        return status.toBuilder().clearInfo().build();
     }
 
     @Override
