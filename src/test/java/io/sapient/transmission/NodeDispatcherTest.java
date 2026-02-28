@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
@@ -600,6 +601,99 @@ class NodeDispatcherTest {
         SapientMessage second = SapientMessage.parseFrom(captor.getAllValues().get(1).array());
         assertEquals(StatusReport.Info.INFO_NEW, second.getStatusReport().getInfo());
         dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void nodeRetriesAfterPublishTimeout() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+
+            // first publish throws TimeoutException, subsequent calls succeed
+            doThrow(new TimeoutException("test timeout"))
+                    .doCallRealMethod()
+                    .when(s.dispatcher)
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+
+            s.dispatcher.register(s.node);
+
+            // should retry and publish registration at least twice
+            verify(s.dispatcher, timeout(2000).atLeast(2))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void statusReportTimeoutDoesNotTriggerReRegistration() throws Exception {
+        try (var s = setup(50)) {
+            s.online.set(true);
+
+            // first status report throws TimeoutException, subsequent calls succeed
+            doThrow(new TimeoutException("test timeout"))
+                    .doCallRealMethod()
+                    .when(s.dispatcher)
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+
+            s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+
+            sendAck(s.onMessage, s.nodeId, true);
+
+            // wait for at least 2 status report attempts (first throws, second succeeds)
+            verify(s.dispatcher, timeout(1000).atLeast(2))
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+
+            // registration must have been sent exactly once — no re-registration triggered
+            verify(s.dispatcher, times(1))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void statusReportTimeoutContinuesSendingReports() throws Exception {
+        try (var s = setup(50)) {
+            s.online.set(true);
+
+            // first status report throws TimeoutException, subsequent calls succeed
+            doThrow(new TimeoutException("test timeout"))
+                    .doCallRealMethod()
+                    .when(s.dispatcher)
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+
+            s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+
+            sendAck(s.onMessage, s.nodeId, true);
+
+            // loop must continue — at least 2 status reports sent despite the first timing out
+            verify(s.dispatcher, timeout(1000).atLeast(2))
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void nodeRetriesAfterRuntimeException() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+
+            // first getRegistration throws, second succeeds
+            when(s.node.getRegistration())
+                    .thenThrow(new RuntimeException("test error"))
+                    .thenReturn(buildRegistration(200));
+
+            s.dispatcher.register(s.node);
+
+            // should retry and publish registration successfully
+            verify(s.dispatcher, timeout(2000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+        }
     }
 
     @Test
