@@ -1,7 +1,5 @@
 package io.sapient.transport;
 
-import jakarta.inject.Inject;
-import jakarta.inject.Singleton;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -15,14 +13,13 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import lombok.NonNull;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * TCP client with automatic reconnection, thread-safe publishing, and single-consumer subscription.
  */
-@Singleton
+@Slf4j
 public class SocketClient implements IClient, Runnable {
 
     private static class Connection implements AutoCloseable {
@@ -38,21 +35,19 @@ public class SocketClient implements IClient, Runnable {
 
         @Override
         public void close() {
-            logger.log(Level.INFO, "closing socket");
+            log.info("closing socket");
             try {
                 socket.close();
             } catch (IOException e) {
-                logger.log(Level.SEVERE, "failed to close socket", e);
+                log.error("failed to close socket", e);
             }
-            logger.log(Level.INFO, "socket closed");
+            log.info("socket closed");
         }
 
         private boolean isConnected() {
             return socket.isConnected();
         }
     }
-
-    private static final Logger logger = Logger.getLogger(SocketClient.class.getName());
 
     private final SocketProvider socketProvider;
 
@@ -61,7 +56,6 @@ public class SocketClient implements IClient, Runnable {
      *
      * @param socketProvider supplier of new socket connections
      */
-    @Inject
     public SocketClient(@NonNull SocketProvider socketProvider) {
         this.socketProvider = socketProvider;
     }
@@ -80,13 +74,13 @@ public class SocketClient implements IClient, Runnable {
         long reconnectAttempts = 0;
 
         while (running.get()) {
-            logger.log(Level.INFO, "initializing new server connection");
+            log.info("initializing new server connection");
 
             try (Connection conn = connect()) {
                 reconnectAttempts = 0;
                 readLoop(conn);
             } catch (IOException e) {
-                logger.log(Level.SEVERE, "server connection failure", e);
+                log.error("server connection failure", e);
             }
 
             if (!running.get()) {
@@ -95,7 +89,7 @@ public class SocketClient implements IClient, Runnable {
 
             long delay = Math.min(++reconnectAttempts, 10);
 
-            logger.log(Level.INFO, "sleep {0}s before reconnecting to the server", delay);
+            log.info("sleep {}s before reconnecting to the server", delay);
 
             try {
                 TimeUnit.SECONDS.sleep(delay);
@@ -103,12 +97,12 @@ public class SocketClient implements IClient, Runnable {
             }
         }
 
-        logger.log(Level.INFO, "client stopped gracefully");
+        log.info("client stopped gracefully");
     }
 
     @Override
     public void close() {
-        logger.log(Level.INFO, "stopping client");
+        log.info("stopping client");
         running.set(false);
         Connection conn = connectionSlot.poll();
         if (conn != null) {
@@ -160,11 +154,11 @@ public class SocketClient implements IClient, Runnable {
                 conn.out.write(msg.array(), msg.position(), msg.remaining());
                 conn.out.flush();
                 if (conn.isConnected() && !connectionSlot.offer(conn)) {
-                    logger.log(Level.SEVERE, "failed to return connection to slot");
+                    log.error("failed to return connection to slot");
                 }
                 return;
             } catch (IOException e) {
-                logger.log(Level.SEVERE, "failed to publish message to the server", e);
+                log.error("failed to publish message to the server", e);
                 // don't put back — slot stays empty until reconnect re-offers
             }
         }

@@ -1,13 +1,8 @@
 package io.sapient.transmission;
 
-import static java.util.logging.Level.INFO;
-import static java.util.logging.Level.SEVERE;
-
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Timestamp;
 import io.sapient.transport.IClient;
-import jakarta.inject.Inject;
-import jakarta.inject.Singleton;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.time.Instant;
@@ -15,8 +10,8 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeoutException;
-import java.util.logging.Logger;
 import lombok.NonNull;
+import lombok.extern.slf4j.Slf4j;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Alert;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.DetectionReport;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
@@ -33,10 +28,8 @@ import uk.gov.dstl.sapientmsg.bsiflex335v2.TaskAck;
  * online polling → registration → wait for ack → status reporting → goodbye on offline. Publish of
  * SapientMessages can also be initiated externally (not by the node thread).
  */
-@Singleton
+@Slf4j
 public class NodeDispatcher implements INodeDispatcher {
-
-    private static final Logger logger = Logger.getLogger(NodeDispatcher.class.getName());
 
     @NonNull private final IClient client;
     @NonNull private final NodeDispatcherConfig config;
@@ -49,7 +42,6 @@ public class NodeDispatcher implements INodeDispatcher {
      * @param client the transport client used to send and receive messages
      * @param config dispatcher configuration (polling intervals, timeouts)
      */
-    @Inject
     public NodeDispatcher(@NonNull IClient client, @NonNull NodeDispatcherConfig config) {
         this.client = client;
         this.config = config;
@@ -60,11 +52,11 @@ public class NodeDispatcher implements INodeDispatcher {
         try {
             _onMessage(buffer);
         } catch (InvalidProtocolBufferException e) {
-            logger.log(SEVERE, "failed to parse incoming message", e);
+            log.error("failed to parse incoming message", e);
         } catch (IllegalArgumentException e) {
-            logger.log(SEVERE, "invalid field in incoming message", e);
+            log.error("invalid field in incoming message", e);
         } catch (TimeoutException e) {
-            logger.log(SEVERE, "publish timeout while processing incoming message", e);
+            log.error("publish timeout while processing incoming message", e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
@@ -76,25 +68,24 @@ public class NodeDispatcher implements INodeDispatcher {
         buffer.get(bytes);
         SapientMessage message = SapientMessage.parseFrom(bytes);
         UUID destinationId = UUID.fromString(message.getDestinationId());
-        var typeAndNodeId = new Object[] {message.getContentCase(), destinationId};
-        logger.log(INFO, "received {0} for node: {1}", typeAndNodeId);
+        log.info("received {} for node: {}", message.getContentCase(), destinationId);
         NodeWrapper node = nodes.get(destinationId);
         switch (message.getContentCase()) {
             case REGISTRATION_ACK -> {
                 if (node == null) {
-                    logger.log(SEVERE, "no node registered for destination: {0}", destinationId);
+                    log.error("no node registered for destination: {}", destinationId);
                     return;
                 }
                 if (message.getRegistrationAck().getAcceptance()) {
                     node.fusionNodeId.set(UUID.fromString(message.getNodeId()));
                 }
                 if (!node.ackQueue.offer(message.getRegistrationAck())) {
-                    logger.log(SEVERE, "ack queue full, dropping ack for node: {0}", destinationId);
+                    log.error("ack queue full, dropping ack for node: {}", destinationId);
                 }
             }
             case ALERT_ACK -> {
                 if (node == null) {
-                    logger.log(SEVERE, "no node registered for destination: {0}", destinationId);
+                    log.error("no node registered for destination: {}", destinationId);
                     return;
                 }
                 node.node.onAlertAck(message.getAlertAck());
@@ -144,13 +135,13 @@ public class NodeDispatcher implements INodeDispatcher {
 
     @Override
     public void register(INode node) {
-        logger.log(INFO, "registering the node: " + node.getNodeId());
+        log.info("registering the node: {}", node.getNodeId());
         nodes.computeIfAbsent(node.getNodeId(), k -> new NodeWrapper(node, this, config));
     }
 
     @Override
     public void unregister(INode node) {
-        logger.log(INFO, "unregistering the node: " + node.getNodeId());
+        log.info("unregistering the node: {}", node.getNodeId());
 
         NodeWrapper wrapper = nodes.remove(node.getNodeId());
         if (wrapper == null) return;
@@ -159,10 +150,10 @@ public class NodeDispatcher implements INodeDispatcher {
         if (!wrapper.registered.getAndSet(false)) return;
 
         try {
-            logger.log(INFO, "sending goodbye for the node: " + node.getNodeId());
+            log.info("sending goodbye for the node: {}", node.getNodeId());
             goodbye(node.getNodeId(), config.publishTimeout());
         } catch (TimeoutException | InterruptedException e) {
-            logger.log(SEVERE, "failed to send goodbye for the node: " + node.getNodeId(), e);
+            log.error("failed to send goodbye for the node: {}", node.getNodeId(), e);
         }
     }
 
@@ -237,7 +228,7 @@ public class NodeDispatcher implements INodeDispatcher {
         try {
             client.close();
         } catch (Exception e) {
-            logger.log(SEVERE, "failed to close client", e);
+            log.error("failed to close client", e);
         }
     }
 

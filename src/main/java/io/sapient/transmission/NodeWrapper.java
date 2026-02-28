@@ -7,15 +7,14 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import lombok.NonNull;
+import lombok.extern.slf4j.Slf4j;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.RegistrationAck;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 
+@Slf4j
 class NodeWrapper implements AutoCloseable {
-    private static final Logger logger = Logger.getLogger(NodeWrapper.class.getName());
 
     @NonNull final INode node;
     final AtomicBoolean registered = new AtomicBoolean(false);
@@ -42,9 +41,9 @@ class NodeWrapper implements AutoCloseable {
                 Thread.currentThread().interrupt();
                 break;
             } catch (TimeoutException e) {
-                logger.log(Level.SEVERE, "publish timeout for node: " + node.getNodeId(), e);
+                log.error("publish timeout for node: {}", node.getNodeId(), e);
             } catch (Exception e) {
-                logger.log(Level.SEVERE, "node lifecycle error: " + node.getNodeId(), e);
+                log.error("node lifecycle error: {}", node.getNodeId(), e);
             }
         }
     }
@@ -67,10 +66,7 @@ class NodeWrapper implements AutoCloseable {
                 dispatcher.publish(
                         node.getStatusReport(), node.getNodeId(), config.publishTimeout());
             } catch (TimeoutException e) {
-                logger.log(
-                        Level.SEVERE,
-                        "status report publish timeout for node: " + node.getNodeId(),
-                        e);
+                log.error("status report publish timeout for node: {}", node.getNodeId(), e);
             }
             Thread.sleep(statusInterval);
         }
@@ -79,8 +75,7 @@ class NodeWrapper implements AutoCloseable {
             try {
                 dispatcher.goodbye(node.getNodeId(), config.publishTimeout());
             } catch (TimeoutException e) {
-                logger.log(
-                        Level.SEVERE, "goodbye publish timeout for node: " + node.getNodeId(), e);
+                log.error("goodbye publish timeout for node: {}", node.getNodeId(), e);
             }
             registered.set(false);
             fusionNodeId.set(null);
