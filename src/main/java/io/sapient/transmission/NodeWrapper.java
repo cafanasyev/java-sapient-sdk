@@ -46,11 +46,10 @@ class NodeWrapper implements AutoCloseable {
                 Duration interval =
                         Duration.ofMillis(
                                 toMillis(registration.getStatusDefinition().getStatusInterval()));
-                while (!Thread.currentThread().isInterrupted()) {
-                    Thread.sleep(interval);
-                    if (!node.isOnline()) break;
+                while (!Thread.currentThread().isInterrupted() && node.isOnline()) {
                     dispatcher.publish(
                             node.getStatusReport(), node.getNodeId(), config.publishTimeout());
+                    Thread.sleep(interval);
                 }
 
                 if (!Thread.currentThread().isInterrupted()) {
