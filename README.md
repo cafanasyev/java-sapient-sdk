@@ -60,3 +60,7 @@ The project uses three static analysis tools that run automatically during the b
 ### IDE setup
 
 Install the [google-java-format](https://plugins.jetbrains.com/plugin/8527-google-java-format) IntelliJ IDEA plugin and select **AOSP** style in its settings. This makes the IDE formatter produce identical output to Spotless.
+
+## License
+
+This project is released into the public domain under the [Unlicense](https://unlicense.org).
