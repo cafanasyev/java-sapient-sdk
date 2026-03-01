@@ -1,5 +1,6 @@
 package io.sapient.transport;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -79,8 +80,14 @@ public class SocketClient implements IClient, Runnable {
             try (Connection conn = connect()) {
                 reconnectAttempts = 0;
                 readLoop(conn);
+            } catch (EOFException e) {
+                if (running.get()) {
+                    log.info("server closed the connection");
+                }
             } catch (IOException e) {
-                log.error("server connection failure", e);
+                if (running.get()) {
+                    log.error("server connection failure", e);
+                }
             }
 
             if (!running.get()) {
@@ -112,6 +119,8 @@ public class SocketClient implements IClient, Runnable {
 
     /***
      *  Blocking method to publish a message to the server socket.
+     *  Each message is framed with a 4-byte big-endian length prefix followed by the message bytes,
+     *  as required by the SAPIENT protocol (BSI Flex 335 v2.0 §4.2).
      *  The connectionSlot queue acts as both a connection-availability gate (empty when
      *  disconnected) and a publishing mutex (only one publisher can hold the connection at a time).
      *
@@ -151,7 +160,13 @@ public class SocketClient implements IClient, Runnable {
             }
 
             try {
-                conn.out.write(msg.array(), msg.position(), msg.remaining());
+                int len = msg.remaining();
+                byte[] frame =
+                        ByteBuffer.allocate(4 + len)
+                                .putInt(len)
+                                .put(msg.array(), msg.position(), len)
+                                .array();
+                conn.out.write(frame);
                 conn.out.flush();
                 if (conn.isConnected() && !connectionSlot.offer(conn)) {
                     log.error("failed to return connection to slot");
@@ -189,21 +204,29 @@ public class SocketClient implements IClient, Runnable {
     }
 
     private void readLoop(Connection connection) throws IOException {
-        byte[] buf = new byte[64 * 1024];
+        byte[] lenBuf = new byte[4];
 
         while (connection.isConnected()) {
-            int n = connection.in.read(buf);
-            if (n < 0) {
-                if (running.get()) {
-                    throw new IOException("connection to the server lost");
-                }
-                return;
-            }
+            readFully(connection.in, lenBuf, 4);
+            int len = ByteBuffer.wrap(lenBuf).getInt();
+            byte[] msgBuf = new byte[len];
+            readFully(connection.in, msgBuf, len);
 
             Consumer<ByteBuffer> cons = consumer.get();
             if (cons != null) {
-                cons.accept(ByteBuffer.wrap(buf, 0, n));
+                cons.accept(ByteBuffer.wrap(msgBuf));
             }
+        }
+    }
+
+    private void readFully(InputStream in, byte[] buf, int count) throws IOException {
+        int total = 0;
+        while (total < count) {
+            int n = in.read(buf, total, count - total);
+            if (n < 0) {
+                throw new EOFException("connection to the server lost");
+            }
+            total += n;
         }
     }
 }

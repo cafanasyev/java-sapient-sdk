@@ -98,7 +98,8 @@ class SocketClientReconnectTest {
     private static Socket mockFailingSocket() throws IOException {
         Socket socket = mock(Socket.class);
         var failIn = mock(java.io.InputStream.class);
-        when(failIn.read(any(byte[].class))).thenThrow(new IOException("Connection reset"));
+        when(failIn.read(any(byte[].class), anyInt(), anyInt()))
+                .thenThrow(new IOException("Connection reset"));
         when(socket.getInputStream()).thenReturn(failIn);
         when(socket.getOutputStream()).thenReturn(new ByteArrayOutputStream());
         when(socket.isConnected()).thenReturn(true);
@@ -129,7 +130,9 @@ class SocketClientReconnectTest {
         }
 
         void send(String msg) throws IOException {
-            serverOut.write(msg.getBytes());
+            byte[] data = msg.getBytes();
+            serverOut.write(
+                    ByteBuffer.allocate(4 + data.length).putInt(data.length).put(data).array());
             serverOut.flush();
         }
 
@@ -138,7 +141,9 @@ class SocketClientReconnectTest {
         }
 
         String captured() {
-            return clientOut.toString();
+            byte[] bytes = clientOut.toByteArray();
+            int len = ByteBuffer.wrap(bytes).getInt();
+            return new String(bytes, 4, len);
         }
     }
 }
