@@ -89,7 +89,16 @@ class NodeWrapper implements AutoCloseable {
 
     @Override
     public void close() {
+        log.info("stopping node: {} gracefully", node.getNodeId());
         thread.interrupt();
+        if (!registered.getAndSet(false)) return;
+        try {
+            log.info("sending goodbye for the node: {}", node.getNodeId());
+            dispatcher.goodbye(node.getNodeId(), config.publishTimeout());
+        } catch (TimeoutException | InterruptedException e) {
+            log.error("failed to send goodbye for the node: {}", node.getNodeId(), e);
+        }
+        log.info("node: {} gracefully stopped", node.getNodeId());
     }
 
     static Duration toDuration(Registration.Duration d) {

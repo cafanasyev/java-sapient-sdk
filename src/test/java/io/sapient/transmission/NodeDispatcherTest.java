@@ -758,6 +758,42 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
+    void closeSendsGoodbyeForRegisteredNodes() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+
+            sendAck(s.onMessage, s.nodeId, true);
+            Thread.sleep(50); // let registered flag be set
+
+            s.dispatcher.close();
+
+            verify(s.dispatcher).goodbye(eq(s.nodeId), any(Duration.class));
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void closeNoGoodbyeForUnregisteredNodes() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+
+            // no ack sent — node not registered yet
+            s.dispatcher.close();
+
+            verify(s.dispatcher, never()).goodbye(any(), any(Duration.class));
+        }
+    }
+
+    @Test
+    @Timeout(3)
     void closeUnblocksRun() throws Exception {
         CountDownLatch running = new CountDownLatch(1);
         CountDownLatch stopped = new CountDownLatch(1);

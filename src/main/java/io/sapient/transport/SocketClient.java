@@ -100,7 +100,8 @@ public class SocketClient implements IClient, Runnable {
 
             try {
                 TimeUnit.SECONDS.sleep(delay);
-            } catch (InterruptedException ignored) {
+            } catch (InterruptedException e) {
+                log.info("reconnect sleep interrupted", e);
             }
         }
 
@@ -164,7 +165,7 @@ public class SocketClient implements IClient, Runnable {
                 byte[] frame =
                         ByteBuffer.allocate(4 + len)
                                 .putInt(len)
-                                .put(msg.array(), msg.position(), len)
+                                .put(msg.array(), msg.arrayOffset() + msg.position(), len)
                                 .array();
                 conn.out.write(frame);
                 conn.out.flush();

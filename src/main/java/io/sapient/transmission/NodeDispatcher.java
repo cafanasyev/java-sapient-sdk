@@ -147,19 +147,9 @@ public class NodeDispatcher implements INodeDispatcher {
     @Override
     public void unregister(INode node) {
         log.info("unregistering the node: {}", node.getNodeId());
-
         NodeWrapper wrapper = nodes.remove(node.getNodeId());
         if (wrapper == null) return;
-
         wrapper.close();
-        if (!wrapper.getRegistered().getAndSet(false)) return;
-
-        try {
-            log.info("sending goodbye for the node: {}", node.getNodeId());
-            goodbye(node.getNodeId(), config.publishTimeout());
-        } catch (TimeoutException | InterruptedException e) {
-            log.error("failed to send goodbye for the node: {}", node.getNodeId(), e);
-        }
     }
 
     @Override
@@ -242,6 +232,7 @@ public class NodeDispatcher implements INodeDispatcher {
 
     @Override
     public void close() {
+        log.info("stopping the dispatcher gracefully");
         nodes.values().forEach(NodeWrapper::close);
         nodes.clear();
         try {
@@ -249,6 +240,7 @@ public class NodeDispatcher implements INodeDispatcher {
         } catch (Exception e) {
             log.error("failed to close client", e);
         }
+        log.info("dispatcher stopped");
     }
 
     @Override
