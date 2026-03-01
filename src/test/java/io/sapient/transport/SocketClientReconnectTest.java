@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.mockito.stubbing.Answer;
 
 @Execution(ExecutionMode.CONCURRENT)
 class SocketClientReconnectTest {
@@ -117,14 +118,13 @@ class SocketClientReconnectTest {
             when(socket.getInputStream()).thenReturn(clientIn);
             when(socket.getOutputStream()).thenReturn(clientOut);
             when(socket.isConnected()).thenAnswer(inv -> connected.get());
-            doAnswer(
-                            inv -> {
-                                connected.set(false);
-                                serverOut.close();
-                                return null;
-                            })
-                    .when(socket)
-                    .close();
+            Answer<Void> closeAnswer =
+                    inv -> {
+                        connected.set(false);
+                        serverOut.close();
+                        return null;
+                    };
+            doAnswer(closeAnswer).when(socket).close();
             return socket;
         }
 

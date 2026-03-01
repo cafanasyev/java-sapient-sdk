@@ -1,7 +1,6 @@
 package io.sapient.transmission;
 
 import java.time.Duration;
-import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeoutException;
@@ -19,7 +18,6 @@ class NodeWrapper implements AutoCloseable {
 
     @Getter @NonNull private final INode node;
     @Getter private final AtomicBoolean registered = new AtomicBoolean(false);
-    @Getter private final AtomicReference<UUID> fusionNodeId = new AtomicReference<>();
     @Getter private final AtomicReference<StatusReport> lastStatusReport = new AtomicReference<>();
     @Getter private final BlockingQueue<RegistrationAck> ackQueue = new ArrayBlockingQueue<>(1);
 
@@ -53,8 +51,7 @@ class NodeWrapper implements AutoCloseable {
         waitUntilOnline();
 
         Registration registration = node.getRegistration();
-        dispatcher.publish(
-                registration, node.getNodeId(), fusionNodeId.get(), config.publishTimeout());
+        dispatcher.publish(registration, node.getNodeId(), config.publishTimeout());
 
         RegistrationAck ack = ackQueue.take();
         node.onRegistrationAck(ack);
@@ -66,10 +63,7 @@ class NodeWrapper implements AutoCloseable {
         while (!Thread.currentThread().isInterrupted() && node.isOnline()) {
             try {
                 dispatcher.publish(
-                        node.getStatusReport(),
-                        node.getNodeId(),
-                        fusionNodeId.get(),
-                        config.publishTimeout());
+                        node.getStatusReport(), node.getNodeId(), config.publishTimeout());
             } catch (TimeoutException e) {
                 log.error("status report publish timeout for node: {}", node.getNodeId(), e);
             }
@@ -78,12 +72,11 @@ class NodeWrapper implements AutoCloseable {
 
         if (!Thread.currentThread().isInterrupted()) {
             try {
-                dispatcher.goodbye(node.getNodeId(), fusionNodeId.get(), config.publishTimeout());
+                dispatcher.goodbye(node.getNodeId(), config.publishTimeout());
             } catch (TimeoutException e) {
                 log.error("goodbye publish timeout for node: {}", node.getNodeId(), e);
             }
             registered.set(false);
-            fusionNodeId.set(null);
             lastStatusReport.set(null);
         }
     }
