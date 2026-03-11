@@ -11,6 +11,8 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Alert;
@@ -35,7 +37,12 @@ public class NodeDispatcher implements INodeDispatcher {
     @NonNull private final IClient client;
     @NonNull private final NodeDispatcherConfig config;
 
-    final ConcurrentMap<UUID, NodeWrapper> nodes = new ConcurrentHashMap<>();
+    final ConcurrentMap<UUID, NodeWrapper> onlineNodes = new ConcurrentHashMap<>();
+    final ConcurrentMap<UUID, NodeWrapper> offlineNodes = new ConcurrentHashMap<>();
+
+    private volatile boolean running = true;
+    private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
+    private final Condition nodeOnline = rwLock.writeLock().newCondition();
 
     /**
      * Creates a dispatcher backed by the given client and configuration.
@@ -70,7 +77,7 @@ public class NodeDispatcher implements INodeDispatcher {
         SapientMessage message = SapientMessage.parseFrom(bytes);
         UUID destinationId = UUID.fromString(message.getDestinationId());
         log.info("received {} for node: {}", message.getContentCase(), destinationId);
-        NodeWrapper node = nodes.get(destinationId);
+        NodeWrapper node = findNode(destinationId);
         switch (message.getContentCase()) {
             case REGISTRATION_ACK -> {
                 if (node == null) {
@@ -88,26 +95,45 @@ public class NodeDispatcher implements INodeDispatcher {
                 }
                 node.getNode().onAlertAck(message.getAlertAck());
             }
-            case TASK -> handleTask(message.getTask(), destinationId, node);
+            case TASK -> {
+                if (node == null) {
+                    var reason = "node not registered: " + destinationId;
+                    log.warn(
+                            "rejecting task {} [command={}, request={}] for node {}: {}",
+                            message.getTask().getTaskId(),
+                            message.getTask().getCommand().getCommandCase(),
+                            message.getTask().getCommand().getRequest(),
+                            destinationId,
+                            reason);
+                    rejectTask(message.getTask(), destinationId, reason);
+                } else if (!onlineNodes.containsKey(destinationId)) {
+                    var reason = "node offline";
+                    log.warn(
+                            "rejecting task {} [command={}, request={}] for node {}: {}",
+                            message.getTask().getTaskId(),
+                            message.getTask().getCommand().getCommandCase(),
+                            message.getTask().getCommand().getRequest(),
+                            destinationId,
+                            reason);
+                    rejectTask(message.getTask(), destinationId, reason);
+                } else {
+                    log.info(
+                            "delivering task {} to node: {}",
+                            message.getTask().getTaskId(),
+                            destinationId);
+                    handleTask(message.getTask(), node);
+                }
+            }
             default -> {}
         }
     }
 
-    private void handleTask(Task task, UUID nodeId, NodeWrapper nodeWrapper)
+    private void handleTask(Task task, NodeWrapper nodeWrapper)
             throws TimeoutException, InterruptedException {
-        if (nodeWrapper == null) {
-            rejectTask(task, nodeId, "node not registered: " + nodeId);
-            return;
-        }
-
         INode node = nodeWrapper.getNode();
 
         if (isRegistrationRequest(task)) {
-            if (node.isOnline()) {
-                publish(node.getRegistration(), node.getNodeId(), config.publishTimeout());
-            } else {
-                rejectTask(task, nodeId, "node offline");
-            }
+            publish(node.getRegistration(), node.getNodeId(), config.publishTimeout());
             return;
         }
 
@@ -116,13 +142,6 @@ public class NodeDispatcher implements INodeDispatcher {
 
     private void rejectTask(Task task, UUID nodeId, String reason)
             throws TimeoutException, InterruptedException {
-        log.warn(
-                "rejecting task {} [command={}, request={}] for node {}: {}",
-                task.getTaskId(),
-                task.getCommand().getCommandCase(),
-                task.getCommand().getRequest(),
-                nodeId,
-                reason);
         TaskAck reject =
                 TaskAck.newBuilder()
                         .setTaskId(task.getTaskId())
@@ -138,16 +157,56 @@ public class NodeDispatcher implements INodeDispatcher {
                 && "registration".equalsIgnoreCase(task.getCommand().getRequest());
     }
 
+    NodeWrapper findNode(UUID id) {
+        rwLock.readLock().lock();
+        try {
+            NodeWrapper w = onlineNodes.get(id);
+            return w != null ? w : offlineNodes.get(id);
+        } finally {
+            rwLock.readLock().unlock();
+        }
+    }
+
+    void onNodeOnline(UUID id) {
+        rwLock.writeLock().lock();
+        try {
+            NodeWrapper w = offlineNodes.remove(id);
+            if (w != null) onlineNodes.put(id, w);
+            nodeOnline.signalAll();
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+    }
+
+    void onNodeOffline(UUID id) {
+        rwLock.writeLock().lock();
+        try {
+            NodeWrapper w = onlineNodes.remove(id);
+            if (w != null) offlineNodes.put(id, w);
+            if (onlineNodes.isEmpty()) {
+                try {
+                    client.close();
+                } catch (Exception e) {
+                    log.error("failed to close client", e);
+                }
+            }
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+    }
+
     @Override
     public void register(INode node) {
         log.info("registering the node: {}", node.getNodeId());
-        nodes.computeIfAbsent(node.getNodeId(), k -> new NodeWrapper(node, this, config));
+        offlineNodes.computeIfAbsent(node.getNodeId(), k -> new NodeWrapper(node, this, config));
     }
 
     @Override
     public void unregister(INode node) {
         log.info("unregistering the node: {}", node.getNodeId());
-        NodeWrapper wrapper = nodes.remove(node.getNodeId());
+        UUID id = node.getNodeId();
+        NodeWrapper wrapper = offlineNodes.remove(id);
+        if (wrapper == null) wrapper = onlineNodes.remove(id);
         if (wrapper == null) return;
         wrapper.close();
     }
@@ -161,7 +220,7 @@ public class NodeDispatcher implements INodeDispatcher {
     @Override
     public void publish(StatusReport status, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        NodeWrapper node = nodes.get(nodeId);
+        NodeWrapper node = findNode(nodeId);
         StatusReport.Info info = StatusReport.Info.INFO_NEW;
         if (node != null) {
             StatusReport prev = node.getLastStatusReport().getAndSet(status);
@@ -233,8 +292,17 @@ public class NodeDispatcher implements INodeDispatcher {
     @Override
     public void close() {
         log.info("stopping the dispatcher gracefully");
-        nodes.values().forEach(NodeWrapper::close);
-        nodes.clear();
+        running = false;
+        rwLock.writeLock().lock();
+        try {
+            nodeOnline.signalAll();
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+        onlineNodes.values().forEach(NodeWrapper::close);
+        offlineNodes.values().forEach(NodeWrapper::close);
+        onlineNodes.clear();
+        offlineNodes.clear();
         try {
             client.close();
         } catch (Exception e) {
@@ -245,6 +313,22 @@ public class NodeDispatcher implements INodeDispatcher {
 
     @Override
     public void run() {
-        client.run();
+        while (running) {
+            rwLock.writeLock().lock();
+            try {
+                while (running && onlineNodes.isEmpty()) {
+                    try {
+                        nodeOnline.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+            } finally {
+                rwLock.writeLock().unlock();
+            }
+            if (!running) break;
+            client.run();
+        }
     }
 }

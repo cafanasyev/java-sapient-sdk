@@ -11,7 +11,8 @@ import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -92,6 +93,7 @@ class NodeDispatcherTest {
 
     record Setup(
             NodeDispatcher dispatcher,
+            IClient client,
             INode node,
             AtomicBoolean online,
             Consumer<ByteBuffer> onMessage,
@@ -117,7 +119,7 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         FUSION_NODE_ID)));
         Consumer<ByteBuffer> onMessage = captureSubscription(client);
-        return new Setup(dispatcher, node, online, onMessage, nodeId);
+        return new Setup(dispatcher, client, node, online, onMessage, nodeId);
     }
 
     // --- Tests ---
@@ -241,7 +243,7 @@ class NodeDispatcherTest {
             verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
             Thread.sleep(50);
 
-            assertNull(s.dispatcher.nodes.get(s.nodeId).getLastStatusReport().get());
+            assertNull(s.dispatcher.findNode(s.nodeId).getLastStatusReport().get());
         }
     }
 
@@ -354,6 +356,9 @@ class NodeDispatcherTest {
             s.online.set(true);
             s.dispatcher.register(s.node);
 
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+
             sendTask(s.onMessage, s.nodeId, Task.newBuilder().setTaskId("task-1").build());
 
             verify(s.node, timeout(1000)).onTask(argThat(t -> "task-1".equals(t.getTaskId())));
@@ -362,9 +367,13 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
-    void nonRegistrationRequestTaskPassedToNode() {
+    void nonRegistrationRequestTaskPassedToNode() throws Exception {
         try (var s = setup(200)) {
+            s.online.set(true);
             s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
 
             sendTask(
                     s.onMessage,
@@ -374,7 +383,7 @@ class NodeDispatcherTest {
                             .setCommand(Task.Command.newBuilder().setRequest("status"))
                             .build());
 
-            verify(s.node).onTask(argThat(t -> "task-1".equals(t.getTaskId())));
+            verify(s.node, timeout(1000)).onTask(argThat(t -> "task-1".equals(t.getTaskId())));
         }
     }
 
@@ -794,26 +803,159 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
-    void closeUnblocksRun() throws Exception {
-        CountDownLatch running = new CountDownLatch(1);
-        CountDownLatch stopped = new CountDownLatch(1);
+    void clientClosedWhenLastNodeGoesOffline() throws Exception {
+        try (var s = setup(50)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
 
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+            sendAck(s.onMessage, s.nodeId, true);
+
+            verify(s.dispatcher, timeout(1000).atLeastOnce())
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+
+            s.online.set(false);
+
+            verify(s.client, timeout(1000)).close();
+        }
+    }
+
+    @Test
+    @Timeout(5)
+    void clientNotClosedWhileAnotherNodeStillOnline() throws Exception {
+        UUID nodeId1 = UUID.randomUUID();
+        UUID nodeId2 = UUID.randomUUID();
+        AtomicBoolean online1 = new AtomicBoolean(true);
+        AtomicBoolean online2 = new AtomicBoolean(true);
+        IClient client = mock(IClient.class);
+        INode node1 = mockNode(nodeId1, online1, 50);
+        INode node2 = mockNode(nodeId2, online2, 50);
+        NodeDispatcher dispatcher =
+                spy(
+                        new NodeDispatcher(
+                                client,
+                                new NodeDispatcherConfig(
+                                        Duration.ofMillis(10),
+                                        Duration.ofSeconds(5),
+                                        FUSION_NODE_ID)));
+        Consumer<ByteBuffer> onMessage = captureSubscription(client);
+
+        dispatcher.register(node1);
+        dispatcher.register(node2);
+
+        verify(dispatcher, timeout(1000).atLeastOnce())
+                .publish(any(Registration.class), eq(nodeId1), any(Duration.class));
+        verify(dispatcher, timeout(1000).atLeastOnce())
+                .publish(any(Registration.class), eq(nodeId2), any(Duration.class));
+
+        sendAck(onMessage, nodeId1, true);
+        sendAck(onMessage, nodeId2, true);
+
+        verify(dispatcher, timeout(1000).atLeastOnce())
+                .publish(any(StatusReport.class), eq(nodeId1), any(Duration.class));
+        verify(dispatcher, timeout(1000).atLeastOnce())
+                .publish(any(StatusReport.class), eq(nodeId2), any(Duration.class));
+
+        // node1 goes offline — node2 still up — client must not close
+        online1.set(false);
+        verify(dispatcher, timeout(1000)).goodbye(eq(nodeId1), any(Duration.class));
+        Thread.sleep(100); // let onNodeOffline complete
+        verify(client, never()).close();
+
+        // node2 goes offline — all offline — client must close
+        online2.set(false);
+        verify(client, timeout(1000)).close();
+
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void runBlocksUntilNodeComesOnline() throws Exception {
+        UUID nodeId = UUID.randomUUID();
+        AtomicBoolean online = new AtomicBoolean(false);
+        IClient client = mock(IClient.class);
+        BlockingQueue<Object> closeSignal = new ArrayBlockingQueue<>(2);
         Answer<Void> runAnswer =
                 inv -> {
-                    running.countDown();
-                    stopped.await();
+                    closeSignal.take();
                     return null;
                 };
         Answer<Void> closeAnswer =
                 inv -> {
-                    stopped.countDown();
+                    closeSignal.offer(new Object());
                     return null;
                 };
-
-        IClient client = mock(IClient.class);
         doAnswer(runAnswer).when(client).run();
         doAnswer(closeAnswer).when(client).close();
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client,
+                        new NodeDispatcherConfig(
+                                Duration.ofMillis(10), Duration.ofSeconds(5), FUSION_NODE_ID));
+        Thread runThread = Thread.ofVirtual().start(dispatcher);
 
+        dispatcher.register(mockNode(nodeId, online, 200));
+        Thread.sleep(50);
+        verify(client, never()).run();
+
+        online.set(true);
+        verify(client, timeout(1000)).run();
+
+        dispatcher.close();
+        runThread.join(1000);
+    }
+
+    @Test
+    @Timeout(5)
+    void runReconnectsAfterAllNodesGoOffline() throws Exception {
+        UUID nodeId1 = UUID.randomUUID();
+        AtomicBoolean online1 = new AtomicBoolean(true);
+        IClient client = mock(IClient.class);
+        BlockingQueue<Object> closeSignal = new ArrayBlockingQueue<>(5);
+        Answer<Void> runAnswer =
+                inv -> {
+                    closeSignal.take();
+                    return null;
+                };
+        Answer<Void> closeAnswer =
+                inv -> {
+                    closeSignal.offer(new Object());
+                    return null;
+                };
+        doAnswer(runAnswer).when(client).run();
+        doAnswer(closeAnswer).when(client).close();
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client,
+                        new NodeDispatcherConfig(
+                                Duration.ofMillis(10), Duration.ofSeconds(5), FUSION_NODE_ID));
+        Consumer<ByteBuffer> onMessage = captureSubscription(client);
+        Thread runThread = Thread.ofVirtual().start(dispatcher);
+
+        dispatcher.register(mockNode(nodeId1, online1, 50));
+        verify(client, timeout(1000).atLeastOnce()).publish(any(ByteBuffer.class), any());
+        sendAck(onMessage, nodeId1, true);
+        verify(client, timeout(1000).atLeast(2)).publish(any(ByteBuffer.class), any());
+
+        // node1 goes offline — all offline — client.close() — first client.run() unblocks
+        online1.set(false);
+        verify(client, timeout(1000)).close();
+
+        // new node comes online — dispatcher reconnects — second client.run() called
+        UUID nodeId2 = UUID.randomUUID();
+        dispatcher.register(mockNode(nodeId2, new AtomicBoolean(true), 200));
+        verify(client, timeout(2000).times(2)).run();
+
+        dispatcher.close();
+        runThread.join(1000);
+    }
+
+    @Test
+    @Timeout(3)
+    void closeUnblocksRun() throws Exception {
+        IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
                 new NodeDispatcher(
                         client,
@@ -821,8 +963,6 @@ class NodeDispatcherTest {
                                 Duration.ofMillis(10), Duration.ofSeconds(5), FUSION_NODE_ID));
 
         Thread thread = Thread.ofVirtual().start(dispatcher);
-
-        running.await();
         dispatcher.close();
 
         thread.join(2000);

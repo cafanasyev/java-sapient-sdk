@@ -21,11 +21,11 @@ class NodeWrapper implements AutoCloseable {
     @Getter private final AtomicReference<StatusReport> lastStatusReport = new AtomicReference<>();
     @Getter private final BlockingQueue<RegistrationAck> ackQueue = new ArrayBlockingQueue<>(1);
 
-    private final INodeDispatcher dispatcher;
+    private final NodeDispatcher dispatcher;
     private final NodeDispatcherConfig config;
     private final Thread thread;
 
-    NodeWrapper(INode node, INodeDispatcher dispatcher, NodeDispatcherConfig config) {
+    NodeWrapper(INode node, NodeDispatcher dispatcher, NodeDispatcherConfig config) {
         this.node = node;
         this.dispatcher = dispatcher;
         this.config = config;
@@ -36,6 +36,7 @@ class NodeWrapper implements AutoCloseable {
         while (!Thread.currentThread().isInterrupted()) {
             try {
                 _run();
+                dispatcher.onNodeOffline(node.getNodeId());
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
@@ -49,6 +50,7 @@ class NodeWrapper implements AutoCloseable {
 
     private void _run() throws InterruptedException, TimeoutException {
         waitUntilOnline();
+        dispatcher.onNodeOnline(node.getNodeId());
 
         Registration registration = node.getRegistration();
         dispatcher.publish(registration, node.getNodeId(), config.publishTimeout());
