@@ -96,32 +96,23 @@ public class NodeDispatcher implements INodeDispatcher {
                 node.getNode().onAlertAck(message.getAlertAck());
             }
             case TASK -> {
+                Task task = message.getTask();
+                String reason = null;
                 if (node == null) {
-                    var reason = "node not registered: " + destinationId;
-                    log.warn(
-                            "rejecting task {} [command={}, request={}] for node {}: {}",
-                            message.getTask().getTaskId(),
-                            message.getTask().getCommand().getCommandCase(),
-                            message.getTask().getCommand().getRequest(),
-                            destinationId,
-                            reason);
-                    rejectTask(message.getTask(), destinationId, reason);
+                    reason = "node not registered: " + destinationId;
                 } else if (!onlineNodes.containsKey(destinationId)) {
-                    var reason = "node offline";
+                    reason = "node offline";
+                }
+                if (reason != null) {
                     log.warn(
-                            "rejecting task {} [command={}, request={}] for node {}: {}",
-                            message.getTask().getTaskId(),
-                            message.getTask().getCommand().getCommandCase(),
-                            message.getTask().getCommand().getRequest(),
+                            "rejecting task {} for node {}: {}",
+                            taskSummary(task),
                             destinationId,
                             reason);
-                    rejectTask(message.getTask(), destinationId, reason);
+                    rejectTask(task, destinationId, reason);
                 } else {
-                    log.info(
-                            "delivering task {} to node: {}",
-                            message.getTask().getTaskId(),
-                            destinationId);
-                    handleTask(message.getTask(), node);
+                    log.info("delivering task {} to node: {}", taskSummary(task), destinationId);
+                    handleTask(task, node);
                 }
             }
             default -> {}
@@ -149,6 +140,14 @@ public class NodeDispatcher implements INodeDispatcher {
                         .addReason(reason)
                         .build();
         publish(reject, nodeId, config.publishTimeout());
+    }
+
+    private static String taskSummary(Task task) {
+        return "%s [command=%s, request=%s]"
+                .formatted(
+                        task.getTaskId(),
+                        task.getCommand().getCommandCase(),
+                        task.getCommand().getRequest());
     }
 
     private static boolean isRegistrationRequest(Task task) {
