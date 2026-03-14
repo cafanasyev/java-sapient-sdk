@@ -117,6 +117,7 @@ class NodeDispatcherTest {
                                 new NodeDispatcherConfig(
                                         Duration.ofMillis(10),
                                         Duration.ofSeconds(5),
+                                        Duration.ofSeconds(5),
                                         FUSION_NODE_ID)));
         Consumer<ByteBuffer> onMessage = captureSubscription(client);
         return new Setup(dispatcher, client, node, online, onMessage, nodeId);
@@ -615,6 +616,31 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
+    void registrationRetriedAfterAckTimeout() throws Exception {
+        UUID nodeId = UUID.randomUUID();
+        AtomicBoolean online = new AtomicBoolean(true);
+        IClient client = mock(IClient.class);
+        INode node = mockNode(nodeId, online, 200);
+        NodeDispatcher dispatcher =
+                spy(
+                        new NodeDispatcher(
+                                client,
+                                new NodeDispatcherConfig(
+                                        Duration.ofMillis(10),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofMillis(100),
+                                        FUSION_NODE_ID)));
+        try (dispatcher) {
+            dispatcher.register(node);
+
+            // no ack sent — ack timeout expires — node must retry registration
+            verify(dispatcher, timeout(2000).atLeast(2))
+                    .publish(any(Registration.class), eq(nodeId), any(Duration.class));
+        }
+    }
+
+    @Test
+    @Timeout(3)
     void nodeRetriesAfterPublishTimeout() throws Exception {
         try (var s = setup(200)) {
             s.online.set(true);
@@ -838,6 +864,7 @@ class NodeDispatcherTest {
                                 new NodeDispatcherConfig(
                                         Duration.ofMillis(10),
                                         Duration.ofSeconds(5),
+                                        Duration.ofSeconds(5),
                                         FUSION_NODE_ID)));
         Consumer<ByteBuffer> onMessage = captureSubscription(client);
 
@@ -893,7 +920,10 @@ class NodeDispatcherTest {
                 new NodeDispatcher(
                         client,
                         new NodeDispatcherConfig(
-                                Duration.ofMillis(10), Duration.ofSeconds(5), FUSION_NODE_ID));
+                                Duration.ofMillis(10),
+                                Duration.ofSeconds(5),
+                                Duration.ofSeconds(5),
+                                FUSION_NODE_ID));
         Thread runThread = Thread.ofVirtual().start(dispatcher);
 
         dispatcher.register(mockNode(nodeId, online, 200));
@@ -930,7 +960,10 @@ class NodeDispatcherTest {
                 new NodeDispatcher(
                         client,
                         new NodeDispatcherConfig(
-                                Duration.ofMillis(10), Duration.ofSeconds(5), FUSION_NODE_ID));
+                                Duration.ofMillis(10),
+                                Duration.ofSeconds(5),
+                                Duration.ofSeconds(5),
+                                FUSION_NODE_ID));
         Consumer<ByteBuffer> onMessage = captureSubscription(client);
         Thread runThread = Thread.ofVirtual().start(dispatcher);
 
@@ -960,7 +993,10 @@ class NodeDispatcherTest {
                 new NodeDispatcher(
                         client,
                         new NodeDispatcherConfig(
-                                Duration.ofMillis(10), Duration.ofSeconds(5), FUSION_NODE_ID));
+                                Duration.ofMillis(10),
+                                Duration.ofSeconds(5),
+                                Duration.ofSeconds(5),
+                                FUSION_NODE_ID));
 
         Thread thread = Thread.ofVirtual().start(dispatcher);
         dispatcher.close();

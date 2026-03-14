@@ -3,6 +3,7 @@ package io.sapient.transmission;
 import java.time.Duration;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -55,7 +56,15 @@ class NodeWrapper implements AutoCloseable {
         Registration registration = node.getRegistration();
         dispatcher.publish(registration, node.getNodeId(), config.publishTimeout());
 
-        RegistrationAck ack = ackQueue.take();
+        RegistrationAck ack =
+                ackQueue.poll(config.registrationAckTimeout().toMillis(), TimeUnit.MILLISECONDS);
+        if (ack == null) {
+            log.error(
+                    "registration ack timeout for node: {} after {}",
+                    node.getNodeId(),
+                    config.registrationAckTimeout());
+            throw new TimeoutException("registration ack timeout for node: " + node.getNodeId());
+        }
         node.onRegistrationAck(ack);
         if (!ack.getAcceptance()) return;
         registered.set(true);

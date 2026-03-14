@@ -9,24 +9,32 @@ import lombok.NonNull;
  *
  * @param onlineCheckInterval interval between node online-status polls
  * @param publishTimeout timeout for publish operations
+ * @param registrationAckTimeout timeout for waiting for a {@code RegistrationAck} after sending a
+ *     {@code Registration}
  * @param destinationId the fusion node recipient for all outbound messages
  */
 public record NodeDispatcherConfig(
         @NonNull Duration onlineCheckInterval,
         @NonNull Duration publishTimeout,
+        @NonNull Duration registrationAckTimeout,
         @NonNull UUID destinationId) {
 
     private static final Duration DEFAULT_ONLINE_CHECK_INTERVAL = Duration.ofSeconds(5);
     private static final Duration DEFAULT_PUBLISH_TIMEOUT = Duration.ofSeconds(5);
+    private static final Duration DEFAULT_REGISTRATION_ACK_TIMEOUT = Duration.ofSeconds(5);
 
     /**
-     * Returns a configuration with default values (5s polling, 5s publish timeout).
+     * Returns a configuration with default values (5s polling, 5s publish timeout, 5s registration
+     * ack timeout).
      *
      * @param destinationId the fusion node recipient for all outbound messages
      * @return configuration with default intervals
      */
     public static NodeDispatcherConfig defaults(@NonNull UUID destinationId) {
         return new NodeDispatcherConfig(
-                DEFAULT_ONLINE_CHECK_INTERVAL, DEFAULT_PUBLISH_TIMEOUT, destinationId);
+                DEFAULT_ONLINE_CHECK_INTERVAL,
+                DEFAULT_PUBLISH_TIMEOUT,
+                DEFAULT_REGISTRATION_ACK_TIMEOUT,
+                destinationId);
     }
 }
