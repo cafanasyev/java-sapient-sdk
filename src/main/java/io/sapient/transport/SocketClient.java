@@ -6,6 +6,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.time.Duration;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -164,6 +165,7 @@ public class SocketClient implements IClient, Runnable {
                 int len = msg.remaining();
                 byte[] frame =
                         ByteBuffer.allocate(4 + len)
+                                .order(ByteOrder.LITTLE_ENDIAN)
                                 .putInt(len)
                                 .put(msg.array(), msg.arrayOffset() + msg.position(), len)
                                 .array();
@@ -209,7 +211,7 @@ public class SocketClient implements IClient, Runnable {
 
         while (connection.isConnected()) {
             readFully(connection.in, lenBuf, 4);
-            int len = ByteBuffer.wrap(lenBuf).getInt();
+            int len = ByteBuffer.wrap(lenBuf).order(ByteOrder.LITTLE_ENDIAN).getInt();
             byte[] msgBuf = new byte[len];
             readFully(connection.in, msgBuf, len);
 

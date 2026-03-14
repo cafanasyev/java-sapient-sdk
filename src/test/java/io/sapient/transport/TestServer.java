@@ -6,6 +6,7 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -78,7 +79,12 @@ public class TestServer implements Runnable, AutoCloseable {
     }
 
     private static void writeFramed(OutputStream out, byte[] data) throws IOException {
-        byte[] frame = ByteBuffer.allocate(4 + data.length).putInt(data.length).put(data).array();
+        byte[] frame =
+                ByteBuffer.allocate(4 + data.length)
+                        .order(ByteOrder.LITTLE_ENDIAN)
+                        .putInt(data.length)
+                        .put(data)
+                        .array();
         out.write(frame);
         out.flush();
     }
@@ -88,7 +94,7 @@ public class TestServer implements Runnable, AutoCloseable {
         if (!readFully(in, lenBuf, 4)) {
             return null;
         }
-        int len = ByteBuffer.wrap(lenBuf).getInt();
+        int len = ByteBuffer.wrap(lenBuf).order(ByteOrder.LITTLE_ENDIAN).getInt();
         byte[] buf = new byte[len];
         if (!readFully(in, buf, len)) {
             return null;

@@ -11,6 +11,7 @@ import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
 import java.net.Socket;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.time.Duration;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
@@ -132,7 +133,11 @@ class SocketClientReconnectTest {
         void send(String msg) throws IOException {
             byte[] data = msg.getBytes();
             serverOut.write(
-                    ByteBuffer.allocate(4 + data.length).putInt(data.length).put(data).array());
+                    ByteBuffer.allocate(4 + data.length)
+                            .order(ByteOrder.LITTLE_ENDIAN)
+                            .putInt(data.length)
+                            .put(data)
+                            .array());
             serverOut.flush();
         }
 
@@ -142,7 +147,7 @@ class SocketClientReconnectTest {
 
         String captured() {
             byte[] bytes = clientOut.toByteArray();
-            int len = ByteBuffer.wrap(bytes).getInt();
+            int len = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).getInt();
             return new String(bytes, 4, len);
         }
     }
