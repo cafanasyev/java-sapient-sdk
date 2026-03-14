@@ -44,6 +44,10 @@ class NodeDispatcherTest {
         return captor.getValue();
     }
 
+    static StatusReport isGoodbye() {
+        return argThat((StatusReport sr) -> sr.getSystem() == StatusReport.System.SYSTEM_GOODBYE);
+    }
+
     static INode mockNode(UUID id, AtomicBoolean online, long statusReportInterval) {
         INode node = mock(INode.class);
         when(node.getNodeId()).thenReturn(id);
@@ -220,7 +224,101 @@ class NodeDispatcherTest {
 
             s.online.set(false);
 
-            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
+            verify(s.dispatcher, timeout(1000))
+                    .publish(isGoodbye(), eq(s.nodeId), any(Duration.class));
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void goodbyeSetsSystemGoodbyeWhenNotAlreadySet() throws Exception {
+        try (var s = setup(50)) {
+            when(s.node.getStatusReport()).thenReturn(StatusReport.getDefaultInstance());
+
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+            sendAck(s.onMessage, s.nodeId, true);
+            s.online.set(false);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(isGoodbye(), eq(s.nodeId), any(Duration.class));
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void goodbyePreservesSystemGoodbyeWhenAlreadySet() throws Exception {
+        try (var s = setup(50)) {
+            when(s.node.getStatusReport())
+                    .thenReturn(
+                            StatusReport.newBuilder()
+                                    .setSystem(StatusReport.System.SYSTEM_GOODBYE)
+                                    .build());
+
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+            sendAck(s.onMessage, s.nodeId, true);
+            s.online.set(false);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(isGoodbye(), eq(s.nodeId), any(Duration.class));
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void goodbyeStatusPopulatedFromNodeStatusReport() throws Exception {
+        try (var s = setup(50)) {
+            StatusReport.Status originalStatus =
+                    StatusReport.Status.newBuilder()
+                            .setStatusLevel(StatusReport.StatusLevel.STATUS_LEVEL_ERROR_STATUS)
+                            .setStatusType(StatusReport.StatusType.STATUS_TYPE_INTERNAL_FAULT)
+                            .setStatusValue("sensor malfunction")
+                            .build();
+            when(s.node.getStatusReport())
+                    .thenReturn(StatusReport.newBuilder().addStatus(originalStatus).build());
+
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+            sendAck(s.onMessage, s.nodeId, true);
+
+            verify(s.dispatcher, timeout(1000).atLeastOnce())
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+
+            s.online.set(false);
+
+            // wait for goodbye to be published, then capture all StatusReport publishes to inspect
+            // it
+            verify(s.dispatcher, timeout(1000))
+                    .publish(isGoodbye(), eq(s.nodeId), any(Duration.class));
+            ArgumentCaptor<StatusReport> captor = ArgumentCaptor.forClass(StatusReport.class);
+            verify(s.dispatcher, atLeastOnce())
+                    .publish(captor.capture(), eq(s.nodeId), any(Duration.class));
+            StatusReport goodbyeReport =
+                    captor.getAllValues().stream()
+                            .filter(sr -> sr.getSystem() == StatusReport.System.SYSTEM_GOODBYE)
+                            .findFirst()
+                            .orElseThrow();
+
+            assertEquals(StatusReport.System.SYSTEM_GOODBYE, goodbyeReport.getSystem());
+            assertEquals(1, goodbyeReport.getStatusCount());
+            StatusReport.Status goodbyeStatus = goodbyeReport.getStatus(0);
+            assertEquals(
+                    StatusReport.StatusLevel.STATUS_LEVEL_ERROR_STATUS,
+                    goodbyeStatus.getStatusLevel());
+            assertEquals(
+                    StatusReport.StatusType.STATUS_TYPE_INTERNAL_FAULT,
+                    goodbyeStatus.getStatusType());
+            assertEquals("sensor malfunction", goodbyeStatus.getStatusValue());
         }
     }
 
@@ -241,7 +339,8 @@ class NodeDispatcherTest {
 
             s.online.set(false);
 
-            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
+            verify(s.dispatcher, timeout(1000))
+                    .publish(isGoodbye(), eq(s.nodeId), any(Duration.class));
             Thread.sleep(50);
 
             assertNull(s.dispatcher.findNode(s.nodeId).getLastStatusReport().get());
@@ -267,7 +366,8 @@ class NodeDispatcherTest {
             // go offline, then online
             s.online.set(false);
 
-            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
+            verify(s.dispatcher, timeout(1000))
+                    .publish(isGoodbye(), eq(s.nodeId), any(Duration.class));
 
             s.online.set(true);
 
@@ -298,7 +398,8 @@ class NodeDispatcherTest {
 
             s.dispatcher.unregister(s.node);
 
-            verify(s.dispatcher, timeout(1000)).goodbye(eq(s.nodeId), any(Duration.class));
+            verify(s.dispatcher, timeout(1000))
+                    .publish(isGoodbye(), eq(s.nodeId), any(Duration.class));
         }
     }
 
@@ -317,7 +418,7 @@ class NodeDispatcherTest {
 
             Thread.sleep(100);
 
-            verify(s.dispatcher, never()).goodbye(any(), any(Duration.class));
+            verify(s.dispatcher, never()).publish(isGoodbye(), any(), any(Duration.class));
         }
     }
 
@@ -525,19 +626,20 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
-    void goodbyeSerializesToClient() throws Exception {
+    void publishDoesNotForceInfoOnGoodbyeStatusReport() throws Exception {
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
                 new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID));
         UUID nodeId = UUID.randomUUID();
+        dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
-        Instant before = Instant.now();
-        dispatcher.goodbye(nodeId, Duration.ofSeconds(1));
+        StatusReport goodbyeReport =
+                StatusReport.newBuilder().setSystem(StatusReport.System.SYSTEM_GOODBYE).build();
+        dispatcher.publish(goodbyeReport, nodeId, Duration.ofSeconds(1));
 
         SapientMessage msg = capturePublished(client);
-        assertEquals(SapientMessage.ContentCase.CONTENT_NOT_SET, msg.getContentCase());
-        assertEquals(nodeId.toString(), msg.getNodeId());
-        assertRecentTimestamp(msg, before);
+        assertEquals(StatusReport.System.SYSTEM_GOODBYE, msg.getStatusReport().getSystem());
+        assertEquals(StatusReport.Info.INFO_UNSPECIFIED, msg.getStatusReport().getInfo());
         dispatcher.close();
     }
 
@@ -566,7 +668,10 @@ class NodeDispatcherTest {
         UUID nodeId = UUID.randomUUID();
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
-        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(
+                StatusReport.newBuilder().setInfo(StatusReport.Info.INFO_NEW).build(),
+                nodeId,
+                Duration.ofSeconds(1));
 
         SapientMessage msg = capturePublished(client);
         assertEquals(StatusReport.Info.INFO_NEW, msg.getStatusReport().getInfo());
@@ -582,7 +687,11 @@ class NodeDispatcherTest {
         UUID nodeId = UUID.randomUUID();
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
-        StatusReport report = StatusReport.newBuilder().setMode("patrol").build();
+        StatusReport report =
+                StatusReport.newBuilder()
+                        .setMode("patrol")
+                        .setInfo(StatusReport.Info.INFO_NEW)
+                        .build();
         dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
         dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
 
@@ -603,9 +712,19 @@ class NodeDispatcherTest {
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
         dispatcher.publish(
-                StatusReport.newBuilder().setMode("patrol").build(), nodeId, Duration.ofSeconds(1));
+                StatusReport.newBuilder()
+                        .setMode("patrol")
+                        .setInfo(StatusReport.Info.INFO_NEW)
+                        .build(),
+                nodeId,
+                Duration.ofSeconds(1));
         dispatcher.publish(
-                StatusReport.newBuilder().setMode("alert").build(), nodeId, Duration.ofSeconds(1));
+                StatusReport.newBuilder()
+                        .setMode("alert")
+                        .setInfo(StatusReport.Info.INFO_NEW)
+                        .build(),
+                nodeId,
+                Duration.ofSeconds(1));
 
         ArgumentCaptor<ByteBuffer> captor = ArgumentCaptor.forClass(ByteBuffer.class);
         verify(client, times(2)).publish(captor.capture(), any(Duration.class));
@@ -806,7 +925,7 @@ class NodeDispatcherTest {
 
             s.dispatcher.close();
 
-            verify(s.dispatcher).goodbye(eq(s.nodeId), any(Duration.class));
+            verify(s.dispatcher).publish(isGoodbye(), eq(s.nodeId), any(Duration.class));
         }
     }
 
@@ -823,7 +942,7 @@ class NodeDispatcherTest {
             // no ack sent — node not registered yet
             s.dispatcher.close();
 
-            verify(s.dispatcher, never()).goodbye(any(), any(Duration.class));
+            verify(s.dispatcher, never()).publish(isGoodbye(), any(), any(Duration.class));
         }
     }
 
@@ -886,7 +1005,7 @@ class NodeDispatcherTest {
 
         // node1 goes offline — node2 still up — client must not close
         online1.set(false);
-        verify(dispatcher, timeout(1000)).goodbye(eq(nodeId1), any(Duration.class));
+        verify(dispatcher, timeout(1000)).publish(isGoodbye(), eq(nodeId1), any(Duration.class));
         Thread.sleep(100); // let onNodeOffline complete
         verify(client, never()).close();
 

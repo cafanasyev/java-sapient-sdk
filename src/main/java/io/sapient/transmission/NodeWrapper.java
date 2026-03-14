@@ -83,7 +83,7 @@ class NodeWrapper implements AutoCloseable {
 
         if (!Thread.currentThread().isInterrupted()) {
             try {
-                dispatcher.goodbye(node.getNodeId(), config.publishTimeout());
+                sendGoodbye();
             } catch (TimeoutException e) {
                 log.error("goodbye publish timeout for node: {}", node.getNodeId(), e);
             }
@@ -105,11 +105,19 @@ class NodeWrapper implements AutoCloseable {
         if (!registered.getAndSet(false)) return;
         try {
             log.info("sending goodbye for the node: {}", node.getNodeId());
-            dispatcher.goodbye(node.getNodeId(), config.publishTimeout());
+            sendGoodbye();
         } catch (TimeoutException | InterruptedException e) {
             log.error("failed to send goodbye for the node: {}", node.getNodeId(), e);
         }
         log.info("node: {} gracefully stopped", node.getNodeId());
+    }
+
+    private void sendGoodbye() throws TimeoutException, InterruptedException {
+        StatusReport sr = node.getStatusReport();
+        if (sr.getSystem() != StatusReport.System.SYSTEM_GOODBYE) {
+            sr = sr.toBuilder().setSystem(StatusReport.System.SYSTEM_GOODBYE).build();
+        }
+        dispatcher.publish(sr, node.getNodeId(), config.publishTimeout());
     }
 
     static Duration toDuration(Registration.Duration d) {

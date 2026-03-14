@@ -220,15 +220,13 @@ public class NodeDispatcher implements INodeDispatcher {
     public void publish(StatusReport status, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
         NodeWrapper node = findNode(nodeId);
-        StatusReport.Info info = StatusReport.Info.INFO_NEW;
-        if (node != null) {
+        if (node != null && status.getInfo() == StatusReport.Info.INFO_NEW) {
             StatusReport prev = node.getLastStatusReport().getAndSet(status);
             if (prev != null && clearInfo(prev).equals(clearInfo(status))) {
-                info = StatusReport.Info.INFO_UNCHANGED;
+                status = status.toBuilder().setInfo(StatusReport.Info.INFO_UNCHANGED).build();
             }
         }
-        StatusReport withInfo = status.toBuilder().setInfo(info).build();
-        publish(SapientMessage.newBuilder().setStatusReport(withInfo), nodeId, timeout);
+        publish(SapientMessage.newBuilder().setStatusReport(status), nodeId, timeout);
     }
 
     private static StatusReport clearInfo(StatusReport status) {
@@ -251,12 +249,6 @@ public class NodeDispatcher implements INodeDispatcher {
     public void publish(DetectionReport detection, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
         publish(SapientMessage.newBuilder().setDetectionReport(detection), nodeId, timeout);
-    }
-
-    @Override
-    public void goodbye(UUID nodeId, Duration timeout)
-            throws TimeoutException, InterruptedException {
-        publish(SapientMessage.newBuilder(), nodeId, timeout);
     }
 
     private void publish(SapientMessage.Builder builder, UUID nodeId, Duration timeout)

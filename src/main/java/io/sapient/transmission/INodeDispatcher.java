@@ -90,14 +90,4 @@ public interface INodeDispatcher extends Runnable, AutoCloseable {
      */
     void publish(DetectionReport detection, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException;
-
-    /**
-     * Sends a goodbye message for the given node.
-     *
-     * @param nodeId the node identifier
-     * @param timeout maximum time to wait
-     * @throws TimeoutException if the operation exceeds the given timeout
-     * @throws InterruptedException if the calling thread is interrupted
-     */
-    void goodbye(UUID nodeId, Duration timeout) throws TimeoutException, InterruptedException;
 }
