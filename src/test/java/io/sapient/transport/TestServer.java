@@ -1,5 +1,6 @@
 package io.sapient.transport;
 
+import com.google.protobuf.InvalidProtocolBufferException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -16,12 +17,22 @@ import javax.net.ssl.SSLServerSocket;
 import lombok.Getter;
 import lombok.SneakyThrows;
 import org.junit.jupiter.api.Assertions;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.RegistrationAck;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
 
 public class TestServer implements Runnable, AutoCloseable {
     private static final int AUTO_ALLOCATED_PORT = 0;
+
+    public static final SapientMessage GREETING =
+            SapientMessage.newBuilder()
+                    .setRegistrationAck(RegistrationAck.newBuilder().setAcceptance(true).build())
+                    .build();
+
     private final ServerSocket serverSocket;
     private final AtomicBoolean running = new AtomicBoolean(true);
-    @Getter private final BlockingQueue<String> clientMessages = new ArrayBlockingQueue<>(8);
+
+    @Getter
+    private final BlockingQueue<SapientMessage> clientMessages = new ArrayBlockingQueue<>(8);
 
     private Socket clientConnection;
 
@@ -60,7 +71,7 @@ public class TestServer implements Runnable, AutoCloseable {
         OutputStream out = clientConnection.getOutputStream();
         InputStream in = clientConnection.getInputStream();
 
-        writeFramed(out, "Hello from server!".getBytes());
+        writeFramed(out, GREETING.toByteArray());
 
         while (running.get()) {
             byte[] msg = readFramed(in);
@@ -69,10 +80,13 @@ public class TestServer implements Runnable, AutoCloseable {
                 break;
             }
 
-            System.out.println(new String(msg));
-
-            boolean offer = clientMessages.offer(new String(msg), 3, TimeUnit.SECONDS);
-            Assertions.assertTrue(offer, "Failed to insert client message to the queue");
+            try {
+                SapientMessage message = SapientMessage.parseFrom(msg);
+                boolean offer = clientMessages.offer(message, 3, TimeUnit.SECONDS);
+                Assertions.assertTrue(offer, "Failed to insert client message to the queue");
+            } catch (InvalidProtocolBufferException e) {
+                Assertions.fail("Failed to parse SapientMessage from client: " + e.getMessage());
+            }
         }
 
         clientConnection.close();

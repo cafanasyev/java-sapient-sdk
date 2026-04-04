@@ -7,12 +7,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
 import io.sapient.transport.IClient;
-import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -21,7 +18,6 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.mockito.ArgumentCaptor;
-import org.mockito.stubbing.Answer;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Alert;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.AlertAck;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.DetectionReport;
@@ -38,8 +34,8 @@ class NodeDispatcherTest {
     // --- Utilities ---
 
     @SuppressWarnings("unchecked")
-    static Consumer<ByteBuffer> captureSubscription(IClient client) {
-        ArgumentCaptor<Consumer<ByteBuffer>> captor = ArgumentCaptor.forClass(Consumer.class);
+    static Consumer<SapientMessage> captureSubscription(IClient client) {
+        ArgumentCaptor<Consumer<SapientMessage>> captor = ArgumentCaptor.forClass(Consumer.class);
         verify(client).subscribe(captor.capture());
         return captor.getValue();
     }
@@ -72,8 +68,8 @@ class NodeDispatcherTest {
 
     static final UUID FUSION_NODE_ID = UUID.randomUUID();
 
-    static void sendRegistrationTask(Consumer<ByteBuffer> onMessage, UUID nodeId) {
-        SapientMessage msg =
+    static void sendRegistrationTask(Consumer<SapientMessage> onMessage, UUID nodeId) {
+        onMessage.accept(
                 SapientMessage.newBuilder()
                         .setDestinationId(nodeId.toString())
                         .setTask(
@@ -81,18 +77,16 @@ class NodeDispatcherTest {
                                         .setCommand(
                                                 Task.Command.newBuilder()
                                                         .setRequest("registration")))
-                        .build();
-        onMessage.accept(ByteBuffer.wrap(msg.toByteArray()));
+                        .build());
     }
 
-    static void sendAck(Consumer<ByteBuffer> onMessage, UUID nodeId, boolean accepted) {
-        SapientMessage msg =
+    static void sendAck(Consumer<SapientMessage> onMessage, UUID nodeId, boolean accepted) {
+        onMessage.accept(
                 SapientMessage.newBuilder()
                         .setNodeId(FUSION_NODE_ID.toString())
                         .setDestinationId(nodeId.toString())
                         .setRegistrationAck(RegistrationAck.newBuilder().setAcceptance(accepted))
-                        .build();
-        onMessage.accept(ByteBuffer.wrap(msg.toByteArray()));
+                        .build());
     }
 
     record Setup(
@@ -100,7 +94,7 @@ class NodeDispatcherTest {
             IClient client,
             INode node,
             AtomicBoolean online,
-            Consumer<ByteBuffer> onMessage,
+            Consumer<SapientMessage> onMessage,
             UUID nodeId)
             implements AutoCloseable {
         @Override
@@ -123,8 +117,34 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
                                         FUSION_NODE_ID)));
-        Consumer<ByteBuffer> onMessage = captureSubscription(client);
+        Consumer<SapientMessage> onMessage = captureSubscription(client);
         return new Setup(dispatcher, client, node, online, onMessage, nodeId);
+    }
+
+    static SapientMessage capturePublished(IClient client) throws Exception {
+        ArgumentCaptor<SapientMessage> captor = ArgumentCaptor.forClass(SapientMessage.class);
+        verify(client).publish(captor.capture(), any(Duration.class));
+        return captor.getValue();
+    }
+
+    static Instant toInstant(com.google.protobuf.Timestamp ts) {
+        return Instant.ofEpochSecond(ts.getSeconds(), ts.getNanos());
+    }
+
+    static void assertRecentTimestamp(SapientMessage msg, Instant before) {
+        assertTrue(msg.hasTimestamp(), "message should have a timestamp");
+        Instant ts = toInstant(msg.getTimestamp());
+        Instant after = Instant.now();
+        assertFalse(ts.isBefore(before), "timestamp should not be before the call");
+        assertFalse(ts.isAfter(after), "timestamp should not be after now");
+    }
+
+    static void sendTask(Consumer<SapientMessage> onMessage, UUID nodeId, Task task) {
+        onMessage.accept(
+                SapientMessage.newBuilder()
+                        .setDestinationId(nodeId.toString())
+                        .setTask(task)
+                        .build());
     }
 
     // --- Tests ---
@@ -430,25 +450,15 @@ class NodeDispatcherTest {
             s.dispatcher.register(s.node);
 
             AlertAck alertAck = AlertAck.newBuilder().setAlertId("alert-1").build();
-            SapientMessage msg =
+            s.onMessage.accept(
                     SapientMessage.newBuilder()
                             .setDestinationId(s.nodeId.toString())
                             .setAlertAck(alertAck)
-                            .build();
-            s.onMessage.accept(ByteBuffer.wrap(msg.toByteArray()));
+                            .build());
 
             verify(s.node, timeout(1000))
                     .onAlertAck(argThat(ack -> "alert-1".equals(ack.getAlertId())));
         }
-    }
-
-    static void sendTask(Consumer<ByteBuffer> onMessage, UUID nodeId, Task task) {
-        SapientMessage msg =
-                SapientMessage.newBuilder()
-                        .setDestinationId(nodeId.toString())
-                        .setTask(task)
-                        .build();
-        onMessage.accept(ByteBuffer.wrap(msg.toByteArray()));
     }
 
     @Test
@@ -514,14 +524,13 @@ class NodeDispatcherTest {
         IClient client = mock(IClient.class);
         try (var dispatcher =
                 new NodeDispatcher(client, NodeDispatcherConfig.defaults(fusionNodeId))) {
-            Consumer<ByteBuffer> onMessage = captureSubscription(client);
+            Consumer<SapientMessage> onMessage = captureSubscription(client);
 
-            SapientMessage inbound =
+            onMessage.accept(
                     SapientMessage.newBuilder()
                             .setDestinationId(unknownNodeId.toString())
                             .setTask(Task.newBuilder().setTaskId("task-1"))
-                            .build();
-            onMessage.accept(ByteBuffer.wrap(inbound.toByteArray()));
+                            .build());
 
             SapientMessage sent = capturePublished(client);
             assertEquals(SapientMessage.ContentCase.TASK_ACK, sent.getContentCase());
@@ -532,24 +541,6 @@ class NodeDispatcherTest {
             assertEquals(fusionNodeId.toString(), sent.getDestinationId());
             assertEquals(unknownNodeId.toString(), sent.getNodeId());
         }
-    }
-
-    static SapientMessage capturePublished(IClient client) throws Exception {
-        ArgumentCaptor<ByteBuffer> captor = ArgumentCaptor.forClass(ByteBuffer.class);
-        verify(client).publish(captor.capture(), any(Duration.class));
-        return SapientMessage.parseFrom(captor.getValue().array());
-    }
-
-    static Instant toInstant(com.google.protobuf.Timestamp ts) {
-        return Instant.ofEpochSecond(ts.getSeconds(), ts.getNanos());
-    }
-
-    static void assertRecentTimestamp(SapientMessage msg, Instant before) {
-        assertTrue(msg.hasTimestamp(), "message should have a timestamp");
-        Instant ts = toInstant(msg.getTimestamp());
-        Instant after = Instant.now();
-        assertFalse(ts.isBefore(before), "timestamp should not be before the call");
-        assertFalse(ts.isAfter(after), "timestamp should not be after now");
     }
 
     @Test
@@ -695,9 +686,9 @@ class NodeDispatcherTest {
         dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
         dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
 
-        ArgumentCaptor<ByteBuffer> captor = ArgumentCaptor.forClass(ByteBuffer.class);
+        ArgumentCaptor<SapientMessage> captor = ArgumentCaptor.forClass(SapientMessage.class);
         verify(client, times(2)).publish(captor.capture(), any(Duration.class));
-        SapientMessage second = SapientMessage.parseFrom(captor.getAllValues().get(1).array());
+        SapientMessage second = captor.getAllValues().get(1);
         assertEquals(StatusReport.Info.INFO_UNCHANGED, second.getStatusReport().getInfo());
         dispatcher.close();
     }
@@ -726,9 +717,9 @@ class NodeDispatcherTest {
                 nodeId,
                 Duration.ofSeconds(1));
 
-        ArgumentCaptor<ByteBuffer> captor = ArgumentCaptor.forClass(ByteBuffer.class);
+        ArgumentCaptor<SapientMessage> captor = ArgumentCaptor.forClass(SapientMessage.class);
         verify(client, times(2)).publish(captor.capture(), any(Duration.class));
-        SapientMessage second = SapientMessage.parseFrom(captor.getAllValues().get(1).array());
+        SapientMessage second = captor.getAllValues().get(1);
         assertEquals(StatusReport.Info.INFO_NEW, second.getStatusReport().getInfo());
         dispatcher.close();
     }
@@ -881,28 +872,20 @@ class NodeDispatcherTest {
                 new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID));
         dispatcher.register(node);
 
-        @SuppressWarnings("unchecked")
-        ArgumentCaptor<Consumer<ByteBuffer>> subCaptor = ArgumentCaptor.forClass(Consumer.class);
-        verify(client).subscribe(subCaptor.capture());
+        Consumer<SapientMessage> onMessage = captureSubscription(client);
 
         Task task =
                 Task.newBuilder()
                         .setTaskId("task-1")
                         .setCommand(Task.Command.newBuilder().setRequest("registration"))
                         .build();
-        subCaptor
-                .getValue()
-                .accept(
-                        ByteBuffer.wrap(
-                                SapientMessage.newBuilder()
-                                        .setDestinationId(nodeId.toString())
-                                        .setTask(task)
-                                        .build()
-                                        .toByteArray()));
+        onMessage.accept(
+                SapientMessage.newBuilder()
+                        .setDestinationId(nodeId.toString())
+                        .setTask(task)
+                        .build());
 
-        ArgumentCaptor<ByteBuffer> publishCaptor = ArgumentCaptor.forClass(ByteBuffer.class);
-        verify(client, timeout(1000)).publish(publishCaptor.capture(), any(Duration.class));
-        SapientMessage sent = SapientMessage.parseFrom(publishCaptor.getValue().array());
+        SapientMessage sent = capturePublished(client);
         assertEquals(SapientMessage.ContentCase.TASK_ACK, sent.getContentCase());
         assertEquals(TaskAck.TaskStatus.TASK_STATUS_REJECTED, sent.getTaskAck().getTaskStatus());
         assertEquals("task-1", sent.getTaskAck().getTaskId());
@@ -948,6 +931,50 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
+    void clientStartedOnlyOnceWhenMultipleNodesOnline() throws Exception {
+        UUID nodeId1 = UUID.randomUUID();
+        UUID nodeId2 = UUID.randomUUID();
+        IClient client = mock(IClient.class);
+        INode node1 = mockNode(nodeId1, new AtomicBoolean(true), 200);
+        INode node2 = mockNode(nodeId2, new AtomicBoolean(true), 200);
+        NodeDispatcher dispatcher =
+                spy(
+                        new NodeDispatcher(
+                                client,
+                                new NodeDispatcherConfig(
+                                        Duration.ofMillis(10),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofSeconds(5),
+                                        FUSION_NODE_ID)));
+        try (dispatcher) {
+            dispatcher.register(node1);
+            dispatcher.register(node2);
+
+            // wait until both nodes have come online and sent registration
+            verify(dispatcher, timeout(1000).atLeastOnce())
+                    .publish(any(Registration.class), eq(nodeId1), any(Duration.class));
+            verify(dispatcher, timeout(1000).atLeastOnce())
+                    .publish(any(Registration.class), eq(nodeId2), any(Duration.class));
+
+            verify(client, times(1)).start();
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void clientStartedWhenFirstNodeComesOnline() throws Exception {
+        try (var s = setup(200)) {
+            verify(s.client, never()).start();
+
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            verify(s.client, timeout(1000)).start();
+        }
+    }
+
+    @Test
+    @Timeout(3)
     void clientClosedWhenLastNodeGoesOffline() throws Exception {
         try (var s = setup(50)) {
             s.online.set(true);
@@ -985,7 +1012,7 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
                                         FUSION_NODE_ID)));
-        Consumer<ByteBuffer> onMessage = captureSubscription(client);
+        Consumer<SapientMessage> onMessage = captureSubscription(client);
 
         dispatcher.register(node1);
         dispatcher.register(node2);
@@ -1017,111 +1044,29 @@ class NodeDispatcherTest {
     }
 
     @Test
-    @Timeout(3)
-    void runBlocksUntilNodeComesOnline() throws Exception {
-        UUID nodeId = UUID.randomUUID();
-        AtomicBoolean online = new AtomicBoolean(false);
-        IClient client = mock(IClient.class);
-        BlockingQueue<Object> closeSignal = new ArrayBlockingQueue<>(2);
-        Answer<Void> runAnswer =
-                inv -> {
-                    closeSignal.take();
-                    return null;
-                };
-        Answer<Void> closeAnswer =
-                inv -> {
-                    closeSignal.offer(new Object());
-                    return null;
-                };
-        doAnswer(runAnswer).when(client).run();
-        doAnswer(closeAnswer).when(client).close();
-        NodeDispatcher dispatcher =
-                new NodeDispatcher(
-                        client,
-                        new NodeDispatcherConfig(
-                                Duration.ofMillis(10),
-                                Duration.ofSeconds(5),
-                                Duration.ofSeconds(5),
-                                FUSION_NODE_ID));
-        Thread runThread = Thread.ofVirtual().start(dispatcher);
-
-        dispatcher.register(mockNode(nodeId, online, 200));
-        Thread.sleep(50);
-        verify(client, never()).run();
-
-        online.set(true);
-        verify(client, timeout(1000)).run();
-
-        dispatcher.close();
-        runThread.join(1000);
-    }
-
-    @Test
     @Timeout(5)
-    void runReconnectsAfterAllNodesGoOffline() throws Exception {
-        UUID nodeId1 = UUID.randomUUID();
-        AtomicBoolean online1 = new AtomicBoolean(true);
-        IClient client = mock(IClient.class);
-        BlockingQueue<Object> closeSignal = new ArrayBlockingQueue<>(5);
-        Answer<Void> runAnswer =
-                inv -> {
-                    closeSignal.take();
-                    return null;
-                };
-        Answer<Void> closeAnswer =
-                inv -> {
-                    closeSignal.offer(new Object());
-                    return null;
-                };
-        doAnswer(runAnswer).when(client).run();
-        doAnswer(closeAnswer).when(client).close();
-        NodeDispatcher dispatcher =
-                new NodeDispatcher(
-                        client,
-                        new NodeDispatcherConfig(
-                                Duration.ofMillis(10),
-                                Duration.ofSeconds(5),
-                                Duration.ofSeconds(5),
-                                FUSION_NODE_ID));
-        Consumer<ByteBuffer> onMessage = captureSubscription(client);
-        Thread runThread = Thread.ofVirtual().start(dispatcher);
+    void clientRestartedAfterAllNodesOffline() throws Exception {
+        try (var s = setup(50)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
 
-        dispatcher.register(mockNode(nodeId1, online1, 50));
-        verify(client, timeout(1000).atLeastOnce()).publish(any(ByteBuffer.class), any());
-        sendAck(onMessage, nodeId1, true);
-        verify(client, timeout(1000).atLeast(2)).publish(any(ByteBuffer.class), any());
+            verify(s.dispatcher, timeout(1000))
+                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
+            sendAck(s.onMessage, s.nodeId, true);
 
-        // node1 goes offline — all offline — client.close() — first client.run() unblocks
-        online1.set(false);
-        verify(client, timeout(1000)).close();
+            verify(s.dispatcher, timeout(1000).atLeastOnce())
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
 
-        // new node comes online — dispatcher reconnects — second client.run() called
-        UUID nodeId2 = UUID.randomUUID();
-        dispatcher.register(mockNode(nodeId2, new AtomicBoolean(true), 200));
-        verify(client, timeout(2000).times(2)).run();
+            // go offline → client closes
+            s.online.set(false);
+            verify(s.client, timeout(1000)).close();
 
-        dispatcher.close();
-        runThread.join(1000);
-    }
+            // new node comes online → client starts again
+            UUID nodeId2 = UUID.randomUUID();
+            AtomicBoolean online2 = new AtomicBoolean(true);
+            s.dispatcher.register(mockNode(nodeId2, online2, 200));
 
-    @Test
-    @Timeout(3)
-    void closeUnblocksRun() throws Exception {
-        IClient client = mock(IClient.class);
-        NodeDispatcher dispatcher =
-                new NodeDispatcher(
-                        client,
-                        new NodeDispatcherConfig(
-                                Duration.ofMillis(10),
-                                Duration.ofSeconds(5),
-                                Duration.ofSeconds(5),
-                                FUSION_NODE_ID));
-
-        Thread thread = Thread.ofVirtual().start(dispatcher);
-        dispatcher.close();
-
-        thread.join(2000);
-
-        assertFalse(thread.isAlive(), "dispatcher.run() should have returned after close()");
+            verify(s.client, timeout(2000).times(2)).start();
+        }
     }
 }

@@ -4,14 +4,13 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.util.JsonFormat;
 import io.sapient.transport.IClient;
-import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.locks.Condition;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
@@ -30,6 +29,10 @@ import uk.gov.dstl.sapientmsg.bsiflex335v2.TaskAck;
  * <p>Each registered node is managed by its own virtual thread that handles the full lifecycle:
  * online polling → registration → wait for ack → status reporting → goodbye on offline. Publish of
  * SapientMessages can also be initiated externally (not by the node thread).
+ *
+ * <p>The underlying {@link IClient} is started when nodes come online and closed when the last node
+ * goes offline, in accordance with the SAPIENT protocol requirement that a Registration message
+ * must be sent shortly after connection.
  */
 @Slf4j
 public class NodeDispatcher implements INodeDispatcher {
@@ -40,9 +43,8 @@ public class NodeDispatcher implements INodeDispatcher {
     final ConcurrentMap<UUID, NodeWrapper> onlineNodes = new ConcurrentHashMap<>();
     final ConcurrentMap<UUID, NodeWrapper> offlineNodes = new ConcurrentHashMap<>();
 
-    private volatile boolean running = true;
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
-    private final Condition nodeOnline = rwLock.writeLock().newCondition();
+    private final AtomicBoolean clientRunning = new AtomicBoolean(false);
 
     /**
      * Creates a dispatcher backed by the given client and configuration.
@@ -56,11 +58,9 @@ public class NodeDispatcher implements INodeDispatcher {
         client.subscribe(this::onMessage);
     }
 
-    private void onMessage(ByteBuffer buffer) {
+    private void onMessage(SapientMessage message) {
         try {
-            _onMessage(buffer);
-        } catch (InvalidProtocolBufferException e) {
-            log.error("failed to parse incoming message", e);
+            _onMessage(message);
         } catch (IllegalArgumentException e) {
             log.error("invalid field in incoming message", e);
         } catch (TimeoutException e) {
@@ -70,11 +70,7 @@ public class NodeDispatcher implements INodeDispatcher {
         }
     }
 
-    private void _onMessage(ByteBuffer buffer)
-            throws InvalidProtocolBufferException, TimeoutException, InterruptedException {
-        byte[] bytes = new byte[buffer.remaining()];
-        buffer.get(bytes);
-        SapientMessage message = SapientMessage.parseFrom(bytes);
+    private void _onMessage(SapientMessage message) throws TimeoutException, InterruptedException {
         UUID destinationId = UUID.fromString(message.getDestinationId());
         log.info("received {} for node: {}", message.getContentCase(), destinationId);
         NodeWrapper node = findNode(destinationId);
@@ -171,7 +167,9 @@ public class NodeDispatcher implements INodeDispatcher {
         try {
             NodeWrapper w = offlineNodes.remove(id);
             if (w != null) onlineNodes.put(id, w);
-            nodeOnline.signalAll();
+            if (!onlineNodes.isEmpty() && clientRunning.compareAndSet(false, true)) {
+                client.start();
+            }
         } finally {
             rwLock.writeLock().unlock();
         }
@@ -185,6 +183,7 @@ public class NodeDispatcher implements INodeDispatcher {
             if (onlineNodes.isEmpty()) {
                 try {
                     client.close();
+                    clientRunning.set(false);
                 } catch (Exception e) {
                     log.error("failed to close client", e);
                 }
@@ -269,7 +268,7 @@ public class NodeDispatcher implements INodeDispatcher {
                 log.debug("message: <serialization failed>", e);
             }
         }
-        client.publish(ByteBuffer.wrap(message.toByteArray()), timeout);
+        client.publish(message, timeout);
     }
 
     private static Timestamp timestampNow() {
@@ -283,13 +282,6 @@ public class NodeDispatcher implements INodeDispatcher {
     @Override
     public void close() {
         log.info("stopping the dispatcher gracefully");
-        running = false;
-        rwLock.writeLock().lock();
-        try {
-            nodeOnline.signalAll();
-        } finally {
-            rwLock.writeLock().unlock();
-        }
         onlineNodes.values().forEach(NodeWrapper::close);
         offlineNodes.values().forEach(NodeWrapper::close);
         onlineNodes.clear();
@@ -300,26 +292,5 @@ public class NodeDispatcher implements INodeDispatcher {
             log.error("failed to close client", e);
         }
         log.info("dispatcher stopped");
-    }
-
-    @Override
-    public void run() {
-        while (running) {
-            rwLock.writeLock().lock();
-            try {
-                while (running && onlineNodes.isEmpty()) {
-                    try {
-                        nodeOnline.await();
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
-                }
-            } finally {
-                rwLock.writeLock().unlock();
-            }
-            if (!running) break;
-            client.run();
-        }
     }
 }

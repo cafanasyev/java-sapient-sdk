@@ -3,8 +3,10 @@ package io.sapient.transport;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.*;
 
+import com.google.protobuf.InvalidProtocolBufferException;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PipedInputStream;
@@ -14,8 +16,6 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.time.Duration;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,29 +24,30 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.mockito.stubbing.Answer;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 
 @Execution(ExecutionMode.CONCURRENT)
 class SocketClientReconnectTest {
 
-    private final ArrayBlockingQueue<String> received = new ArrayBlockingQueue<>(8);
+    private final ArrayBlockingQueue<SapientMessage> received = new ArrayBlockingQueue<>(8);
     private final SocketProvider supplier = mock();
     private final SocketClient client = new SocketClient(supplier);
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     @BeforeEach
     void setUp() {
-        client.subscribe(
-                bb -> {
-                    byte[] data = new byte[bb.remaining()];
-                    bb.get(data);
-                    received.offer(new String(data));
-                });
+        client.subscribe(received::offer);
     }
 
     @AfterEach
     void tearDown() {
         client.close();
-        executor.shutdownNow();
+    }
+
+    static SapientMessage msg(String mode) {
+        return SapientMessage.newBuilder()
+                .setStatusReport(StatusReport.newBuilder().setMode(mode).build())
+                .build();
     }
 
     @Test
@@ -57,24 +58,24 @@ class SocketClientReconnectTest {
         Socket s1 = pipe1.socket(), s2 = pipe2.socket();
         when(supplier.get()).thenReturn(s1, s2);
 
-        executor.execute(client);
+        client.start();
 
-        pipe1.send("msg1");
-        assertEquals("msg1", received.poll(2, SECONDS));
+        pipe1.send(msg("msg1"));
+        assertEquals(msg("msg1"), received.poll(2, SECONDS));
 
-        client.publish(ByteBuffer.wrap("pub1".getBytes()), Duration.ofSeconds(2));
-        assertEquals("pub1", pipe1.captured());
+        client.publish(msg("pub1"), Duration.ofSeconds(2));
+        assertEquals(msg("pub1"), pipe1.captured());
 
         // simulate server disconnect → EOF on read → triggers reconnect
         pipe1.serverClose();
 
-        pipe2.send("msg2");
-        assertEquals("msg2", received.poll(3, SECONDS));
+        pipe2.send(msg("msg2"));
+        assertEquals(msg("msg2"), received.poll(3, SECONDS));
 
         verify(supplier, atLeast(2)).get();
 
-        client.publish(ByteBuffer.wrap("pub2".getBytes()), Duration.ofSeconds(2));
-        assertEquals("pub2", pipe2.captured());
+        client.publish(msg("pub2"), Duration.ofSeconds(2));
+        assertEquals(msg("pub2"), pipe2.captured());
     }
 
     @Test
@@ -85,15 +86,15 @@ class SocketClientReconnectTest {
         Socket goodSocket = pipe.socket();
         when(supplier.get()).thenReturn(failSocket, goodSocket);
 
-        executor.execute(client);
+        client.start();
 
-        pipe.send("hello");
-        assertEquals("hello", received.poll(3, SECONDS));
+        pipe.send(msg("hello"));
+        assertEquals(msg("hello"), received.poll(3, SECONDS));
 
         verify(supplier, atLeast(2)).get();
 
-        client.publish(ByteBuffer.wrap("world".getBytes()), Duration.ofSeconds(2));
-        assertEquals("world", pipe.captured());
+        client.publish(msg("world"), Duration.ofSeconds(2));
+        assertEquals(msg("world"), pipe.captured());
     }
 
     private static Socket mockFailingSocket() throws IOException {
@@ -130,8 +131,8 @@ class SocketClientReconnectTest {
             return socket;
         }
 
-        void send(String msg) throws IOException {
-            byte[] data = msg.getBytes();
+        void send(SapientMessage msg) throws IOException {
+            byte[] data = msg.toByteArray();
             serverOut.write(
                     ByteBuffer.allocate(4 + data.length)
                             .order(ByteOrder.LITTLE_ENDIAN)
@@ -145,10 +146,10 @@ class SocketClientReconnectTest {
             serverOut.close();
         }
 
-        String captured() {
+        SapientMessage captured() throws InvalidProtocolBufferException {
             byte[] bytes = clientOut.toByteArray();
             int len = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).getInt();
-            return new String(bytes, 4, len);
+            return SapientMessage.parseFrom(java.util.Arrays.copyOfRange(bytes, 4, 4 + len));
         }
     }
 }

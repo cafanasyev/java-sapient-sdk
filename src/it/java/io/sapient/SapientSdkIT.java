@@ -11,7 +11,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.net.Socket;
-import java.time.Duration;
 import java.util.UUID;
 
 
@@ -20,7 +19,6 @@ class SapientSdkIT {
 
     private TestServer server;
     private NodeDispatcher dispatcher;
-    private Thread dispatcherThread;
 
     @BeforeAll
     void startApp() throws Exception {
@@ -29,13 +27,11 @@ class SapientSdkIT {
 
         SocketClient client = new SocketClient(() -> socket(server.getLocalPort()));
         dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults(UUID.randomUUID()));
-        dispatcherThread = Thread.ofVirtual().start(dispatcher);
     }
 
     @AfterAll
     void stopApp() throws Exception {
         dispatcher.close();
-        dispatcherThread.join(5000);
     }
 
     @SneakyThrows

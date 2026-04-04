@@ -13,7 +13,7 @@ import uk.gov.dstl.sapientmsg.bsiflex335v2.TaskAck;
  * Manages SAPIENT node lifecycles and routes typed Protobuf messages through an {@link
  * io.sapient.transport.IClient}.
  */
-public interface INodeDispatcher extends Runnable, AutoCloseable {
+public interface INodeDispatcher extends AutoCloseable {
 
     /**
      * Registers a node with this dispatcher.
