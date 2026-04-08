@@ -8,7 +8,7 @@ import javax.net.ssl.SSLContext;
  * Loads test TLS certificates from src/test/resources/tls/ and builds SSLContexts for both client
  * and server sides of mTLS.
  */
-class TestTlsConfig {
+class TestDerTlsConfig {
 
     private final byte[] caCert;
     private final byte[] serverKey;
@@ -16,7 +16,7 @@ class TestTlsConfig {
     private final byte[] clientKey;
     private final byte[] clientCert;
 
-    TestTlsConfig() throws IOException {
+    TestDerTlsConfig() throws IOException {
         caCert = load("tls/ca.der");
         serverKey = load("tls/server-key.der");
         serverCert = load("tls/server-cert.der");
@@ -25,15 +25,15 @@ class TestTlsConfig {
     }
 
     SSLContext serverContext() throws GeneralSecurityException, IOException {
-        return new SslContextFactory().create(serverKey, "RSA", serverCert, caCert);
+        return new SslContextFactory().create(serverKey, serverCert, caCert);
     }
 
     SSLContext clientContext() throws GeneralSecurityException, IOException {
-        return new SslContextFactory().create(clientKey, "RSA", clientCert, caCert);
+        return new SslContextFactory().create(clientKey, clientCert, caCert);
     }
 
     private static byte[] load(String resourcePath) throws IOException {
-        try (var is = TestTlsConfig.class.getClassLoader().getResourceAsStream(resourcePath)) {
+        try (var is = TestDerTlsConfig.class.getClassLoader().getResourceAsStream(resourcePath)) {
             if (is == null) throw new IOException("resource not found: " + resourcePath);
             return is.readAllBytes();
         }

@@ -49,7 +49,7 @@ class SocketClientTest {
     @Test
     @Timeout(10)
     void testClientReconnect() throws Exception {
-        var tls = new TestTlsConfig();
+        var tls = new TestDerTlsConfig();
         var serverCtx = tls.serverContext();
         var clientCtx = tls.clientContext();
         var server = new TestServer(serverCtx);
