@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Cache Maven wrapper
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/wrapper/dists
+          key: mvnw-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
+          restore-keys: mvnw-
+
+      - name: Run lint checks
+        run: ./mvnw verify -DskipTests -Dmaven.source.skip=true -Dmaven.javadoc.skip=true -ntp
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Cache Maven wrapper
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/wrapper/dists
+          key: mvnw-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
+          restore-keys: mvnw-
+
+      - name: Run unit tests
+        run: ./mvnw test -Dspotless.check.skip=true -ntp
