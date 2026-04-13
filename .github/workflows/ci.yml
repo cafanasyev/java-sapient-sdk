@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -25,7 +28,7 @@ jobs:
           restore-keys: mvnw-
 
       - name: Run lint checks
-        run: ./mvnw verify -DskipTests -Dmaven.source.skip=true -Dmaven.javadoc.skip=true -ntp
+        run: ./mvnw verify -DskipTests -Djacoco.skip=true -Dmaven.source.skip=true -Dmaven.javadoc.skip=true -ntp
 
   test:
     runs-on: ubuntu-latest
@@ -48,3 +51,9 @@ jobs:
 
       - name: Run unit tests
         run: ./mvnw test -Dspotless.check.skip=true -ntp
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: target/site/jacoco/jacoco.xml

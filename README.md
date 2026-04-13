@@ -1,5 +1,8 @@
 # java-sapient-sdk
 
+[![CI](https://github.com/cafanasyev/java-sapient-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/cafanasyev/java-sapient-sdk/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/cafanasyev/java-sapient-sdk/graph/badge.svg)](https://codecov.io/gh/cafanasyev/java-sapient-sdk)
+
 Java SDK for [BSI Flex 335 v2.0](https://www.bsigroup.com/en-US/insights-and-media/insights/brochures/bsi-flex-335-interface-of-the-sapient-sensor-management-specification/) SAPIENT — a protocol standard for autonomous sensor and effector interoperability. The SDK provides TCP client connectivity and node dispatching for communicating with SAPIENT fusion nodes using Protobuf-serialized messages.
 
 ## Requirements

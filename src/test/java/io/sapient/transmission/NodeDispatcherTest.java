@@ -59,7 +59,7 @@ class NodeDispatcherTest {
                         Registration.StatusDefinition.newBuilder()
                                 .setStatusInterval(
                                         Registration.Duration.newBuilder()
-                                                .setValue(statusReportInterval)
+                                                .setValue((float) statusReportInterval)
                                                 .setUnits(
                                                         Registration.TimeUnits
                                                                 .TIME_UNITS_MILLISECONDS)))

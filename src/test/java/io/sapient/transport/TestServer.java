@@ -56,6 +56,7 @@ public class TestServer implements Runnable, AutoCloseable {
                 clientConnection.close();
             }
         } catch (IOException ignored) {
+            // best-effort close before shutting down the server socket
         }
         serverSocket.close();
     }
