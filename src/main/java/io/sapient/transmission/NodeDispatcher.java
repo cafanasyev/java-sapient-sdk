@@ -3,6 +3,7 @@ package io.sapient.transmission;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.util.JsonFormat;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.sapient.transport.IClient;
 import java.time.Duration;
 import java.time.Instant;
@@ -52,6 +53,10 @@ public class NodeDispatcher implements INodeDispatcher {
      * @param client the transport client used to send and receive messages
      * @param config dispatcher configuration (polling intervals, timeouts)
      */
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification =
+                    "IClient is an injected interface dependency, not a mutable data structure — defensive copy is not applicable")
     public NodeDispatcher(@NonNull IClient client, @NonNull NodeDispatcherConfig config) {
         this.client = client;
         this.config = config;
