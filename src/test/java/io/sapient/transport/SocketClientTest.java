@@ -3,10 +3,12 @@ package io.sapient.transport;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import java.io.IOException;
 import java.net.Socket;
 import java.time.Duration;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntSupplier;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
@@ -19,6 +21,38 @@ class SocketClientTest {
 
     private static final SapientMessage CLIENT_MESSAGE =
             SapientMessage.newBuilder().setRegistration(Registration.getDefaultInstance()).build();
+
+    @FunctionalInterface
+    private interface SocketSupplier {
+        Socket get() throws IOException;
+    }
+
+    private static class TestSocketProvider implements SocketProvider {
+        private final String host;
+        private final IntSupplier portSupplier;
+        private final SocketSupplier socketSupplier;
+
+        TestSocketProvider(String host, IntSupplier portSupplier, SocketSupplier socketSupplier) {
+            this.host = host;
+            this.portSupplier = portSupplier;
+            this.socketSupplier = socketSupplier;
+        }
+
+        @Override
+        public Socket get() throws IOException {
+            return socketSupplier.get();
+        }
+
+        @Override
+        public String host() {
+            return host;
+        }
+
+        @Override
+        public int port() {
+            return portSupplier.getAsInt();
+        }
+    }
 
     private static SocketClient newClient(
             SocketProvider provider, ArrayBlockingQueue<SapientMessage> received) {
@@ -33,7 +67,10 @@ class SocketClientTest {
         var server = new TestServer();
         int port = server.getLocalPort();
         var received = new ArrayBlockingQueue<SapientMessage>(1);
-        var client = newClient(() -> new Socket("localhost", port), received);
+        var provider =
+                new TestSocketProvider(
+                        "localhost", () -> port, () -> new Socket("localhost", port));
+        var client = newClient(provider, received);
 
         try (server;
                 client) {
@@ -55,10 +92,12 @@ class SocketClientTest {
         var server = new TestServer(serverCtx);
         var port = new AtomicInteger(server.getLocalPort());
         var received = new ArrayBlockingQueue<SapientMessage>(1);
-        var client =
-                newClient(
-                        () -> clientCtx.getSocketFactory().createSocket("localhost", port.get()),
-                        received);
+        var provider =
+                new TestSocketProvider(
+                        "localhost",
+                        port::get,
+                        () -> clientCtx.getSocketFactory().createSocket("localhost", port.get()));
+        var client = newClient(provider, received);
 
         try (client) {
             Thread.startVirtualThread(server);

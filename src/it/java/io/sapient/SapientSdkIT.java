@@ -3,16 +3,16 @@ package io.sapient;
 import io.sapient.transmission.NodeDispatcher;
 import io.sapient.transmission.NodeDispatcherConfig;
 import io.sapient.transport.SocketClient;
+import io.sapient.transport.SocketProvider;
 import io.sapient.transport.TestServer;
+import java.io.IOException;
+import java.net.Socket;
+import java.util.UUID;
 import lombok.SneakyThrows;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-
-import java.net.Socket;
-import java.util.UUID;
-
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class SapientSdkIT {
@@ -25,7 +25,24 @@ class SapientSdkIT {
         server = new TestServer();
         Thread.ofVirtual().start(server);
 
-        SocketClient client = new SocketClient(() -> socket(server.getLocalPort()));
+        SocketClient client =
+                new SocketClient(
+                        new SocketProvider() {
+                            @Override
+                            public Socket get() throws IOException {
+                                return socket(server.getLocalPort());
+                            }
+
+                            @Override
+                            public String host() {
+                                return "localhost";
+                            }
+
+                            @Override
+                            public int port() {
+                                return server.getLocalPort();
+                            }
+                        });
         dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults(UUID.randomUUID()));
     }
 

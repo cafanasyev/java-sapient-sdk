@@ -5,16 +5,23 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
@@ -60,7 +67,7 @@ public class SocketClient implements IClient {
     /**
      * Creates a client that obtains connections from the given provider.
      *
-     * @param socketProvider supplier of new socket connections
+     * @param socketProvider supplies new socket connections and describes the remote address
      */
     public SocketClient(@NonNull SocketProvider socketProvider) {
         this.socketProvider = socketProvider;
@@ -74,6 +81,12 @@ public class SocketClient implements IClient {
 
     private final AtomicReference<Consumer<SapientMessage>> consumer = new AtomicReference<>();
 
+    private final AtomicReference<ConnectionState> state =
+            new AtomicReference<>(ConnectionState.DISCONNECTED);
+
+    private final List<BiConsumer<ConnectionState, Instant>> stateListeners = new ArrayList<>();
+    private final ReadWriteLock listenersLock = new ReentrantReadWriteLock();
+
     @Override
     public void start() {
         if (running.compareAndSet(false, true)) {
@@ -86,9 +99,11 @@ public class SocketClient implements IClient {
 
         while (running.get()) {
             log.info("initializing new server connection");
+            setState(ConnectionState.CONNECTING);
 
             try (Connection conn = connect()) {
                 reconnectAttempts = 0;
+                setState(ConnectionState.CONNECTED);
                 readLoop(conn);
             } catch (EOFException e) {
                 if (running.get()) {
@@ -103,6 +118,8 @@ public class SocketClient implements IClient {
             if (!running.get()) {
                 break;
             }
+
+            setState(ConnectionState.DISCONNECTED);
 
             long delay = Math.min(++reconnectAttempts, 10);
 
@@ -122,6 +139,7 @@ public class SocketClient implements IClient {
     public void close() {
         log.info("stopping client");
         running.set(false);
+        setState(ConnectionState.CLOSED);
         Connection conn = connectionSlot.poll();
         if (conn != null) {
             conn.close();
@@ -204,6 +222,63 @@ public class SocketClient implements IClient {
     @Override
     public void subscribe(Consumer<SapientMessage> c) {
         consumer.set(c);
+    }
+
+    @Override
+    public ConnectionState getState() {
+        return state.get();
+    }
+
+    @Override
+    public void addStateChangeListener(BiConsumer<ConnectionState, Instant> listener) {
+        listenersLock.writeLock().lock();
+        try {
+            stateListeners.add(listener);
+        } finally {
+            listenersLock.writeLock().unlock();
+        }
+    }
+
+    @Override
+    public void removeStateChangeListener(BiConsumer<ConnectionState, Instant> listener) {
+        listenersLock.writeLock().lock();
+        try {
+            stateListeners.remove(listener);
+        } finally {
+            listenersLock.writeLock().unlock();
+        }
+    }
+
+    @Override
+    public boolean probeReachable(Duration timeout) {
+        try (Socket probe = new Socket()) {
+            probe.connect(
+                    new InetSocketAddress(socketProvider.host(), socketProvider.port()),
+                    (int) timeout.toMillis());
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private void setState(ConnectionState next) {
+        ConnectionState prev = state.getAndSet(next);
+        if (prev == next) {
+            return;
+        }
+        Instant ts = Instant.now();
+        listenersLock.readLock().lock();
+        try {
+            for (BiConsumer<ConnectionState, Instant> listener : stateListeners) {
+                try {
+                    listener.accept(next, ts);
+                } catch (Exception e) {
+                    log.error("state change listener threw exception", e);
+                }
+            }
+        } finally {
+            listenersLock.readLock().unlock();
+        }
     }
 
     private Connection connect() throws IOException {
