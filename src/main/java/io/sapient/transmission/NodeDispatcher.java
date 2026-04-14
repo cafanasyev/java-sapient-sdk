@@ -4,6 +4,7 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.util.JsonFormat;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import io.sapient.transport.ConnectionState;
 import io.sapient.transport.IClient;
 import java.time.Duration;
 import java.time.Instant;
@@ -12,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
@@ -47,6 +49,21 @@ public class NodeDispatcher implements INodeDispatcher {
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
     private final AtomicBoolean clientRunning = new AtomicBoolean(false);
 
+    // fraction applied to period thresholds so scheduler jitter and GC pauses of a few
+    // milliseconds do not mask a real outage at the boundary
+    static final double THRESHOLD_TOLERANCE = 0.95;
+
+    // set when the client transitions to DISCONNECTED
+    private final AtomicReference<Instant> disconnectedAt = new AtomicReference<>();
+    // set when the client reconnects and the disconnect gap exceeded the grace period;
+    // initialised to Instant.MIN so reconnectedAfter() needs no null check
+    private final AtomicReference<Instant> lastGraceExpiredReconnectAt =
+            new AtomicReference<>(Instant.MIN);
+
+    static Duration withTolerance(Duration d) {
+        return Duration.ofNanos((long) (d.toNanos() * THRESHOLD_TOLERANCE));
+    }
+
     /**
      * Creates a dispatcher backed by the given client and configuration.
      *
@@ -61,6 +78,25 @@ public class NodeDispatcher implements INodeDispatcher {
         this.client = client;
         this.config = config;
         client.subscribe(this::onMessage);
+        client.addStateChangeListener(this::onClientStateChange);
+    }
+
+    private void onClientStateChange(ConnectionState newState, Instant ts) {
+        if (newState == ConnectionState.DISCONNECTED) {
+            disconnectedAt.set(ts);
+        } else if (newState == ConnectionState.CONNECTED) {
+            Instant lost = disconnectedAt.getAndSet(null);
+            if (lost == null) return;
+            Duration gap = Duration.between(lost, ts);
+            if (gap.compareTo(withTolerance(config.reconnectGracePeriod())) >= 0) {
+                lastGraceExpiredReconnectAt.set(ts);
+            }
+        }
+    }
+
+    /** Returns {@code true} if a grace-period-exceeding reconnect occurred after {@code since}. */
+    boolean reconnectedAfter(Instant since) {
+        return lastGraceExpiredReconnectAt.get().isAfter(since);
     }
 
     private void onMessage(SapientMessage message) {
@@ -215,13 +251,13 @@ public class NodeDispatcher implements INodeDispatcher {
     }
 
     @Override
-    public void publish(Registration registration, UUID nodeId, Duration timeout)
+    public SapientMessage publish(Registration registration, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        publish(SapientMessage.newBuilder().setRegistration(registration), nodeId, timeout);
+        return publish(SapientMessage.newBuilder().setRegistration(registration), nodeId, timeout);
     }
 
     @Override
-    public void publish(StatusReport status, UUID nodeId, Duration timeout)
+    public SapientMessage publish(StatusReport status, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
         NodeWrapper node = findNode(nodeId);
         if (node != null && status.getInfo() == StatusReport.Info.INFO_NEW) {
@@ -230,7 +266,7 @@ public class NodeDispatcher implements INodeDispatcher {
                 status = status.toBuilder().setInfo(StatusReport.Info.INFO_UNCHANGED).build();
             }
         }
-        publish(SapientMessage.newBuilder().setStatusReport(status), nodeId, timeout);
+        return publish(SapientMessage.newBuilder().setStatusReport(status), nodeId, timeout);
     }
 
     private static StatusReport clearInfo(StatusReport status) {
@@ -238,24 +274,24 @@ public class NodeDispatcher implements INodeDispatcher {
     }
 
     @Override
-    public void publish(TaskAck taskAck, UUID nodeId, Duration timeout)
+    public SapientMessage publish(TaskAck taskAck, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        publish(SapientMessage.newBuilder().setTaskAck(taskAck), nodeId, timeout);
+        return publish(SapientMessage.newBuilder().setTaskAck(taskAck), nodeId, timeout);
     }
 
     @Override
-    public void publish(Alert alert, UUID nodeId, Duration timeout)
+    public SapientMessage publish(Alert alert, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        publish(SapientMessage.newBuilder().setAlert(alert), nodeId, timeout);
+        return publish(SapientMessage.newBuilder().setAlert(alert), nodeId, timeout);
     }
 
     @Override
-    public void publish(DetectionReport detection, UUID nodeId, Duration timeout)
+    public SapientMessage publish(DetectionReport detection, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        publish(SapientMessage.newBuilder().setDetectionReport(detection), nodeId, timeout);
+        return publish(SapientMessage.newBuilder().setDetectionReport(detection), nodeId, timeout);
     }
 
-    private void publish(SapientMessage.Builder builder, UUID nodeId, Duration timeout)
+    private SapientMessage publish(SapientMessage.Builder builder, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
         builder.setNodeId(nodeId.toString())
                 .setTimestamp(timestampNow())
@@ -274,6 +310,7 @@ public class NodeDispatcher implements INodeDispatcher {
             }
         }
         client.publish(message, timeout);
+        return message;
     }
 
     private static Timestamp timestampNow() {

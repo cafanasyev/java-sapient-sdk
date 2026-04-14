@@ -77,3 +77,70 @@ connection.
 `BiConsumer<ConnectionState, Instant>` listeners to react to transitions with a precise event
 timestamp. `probeReachable(Duration)` provides a transport-agnostic TCP-level health check with
 no ICMP dependency.
+
+---
+
+## 3 — §4.9 re-registration after prolonged connection loss
+
+### Problem
+
+BSI Flex 335 v2.0 §4.9 requires re-sending a registration message if reconnection occurs more than
+2 minutes after the node noticed loss of connection. The server's complementary behaviour is: close
+the TCP connection after 3 consecutive missed status reports, then retain the registration state for
+2 minutes from that point.
+
+`NodeWrapper` never re-registered after a reconnect. The status loop caught `TimeoutException`
+internally and kept retrying indefinitely, so even a multi-hour TCP outage would result in status
+reporting silently resuming without re-registration once the connection came back.
+
+Two distinct failure modes require re-registration:
+
+1. **Process suspension** (laptop sleep, container pause). Threads freeze, no status reports are
+   delivered, and the wall clock advances. On wake, the server has already closed the TCP
+   connection; the OS buffers the server's FIN, so `readLoop` gets an EOF immediately. Measuring
+   the `DISCONNECTED→CONNECTED` gap yields seconds regardless of how long the process was
+   suspended — masking an outage of arbitrary length.
+
+2. **Server crash with TCP reconnect within the grace period.** The server drops all registrations
+   immediately on crash. If the server restarts quickly (e.g. 2 minutes 1 second), the TCP
+   reconnect succeeds but the server has no memory of the node. The time-based check alone cannot
+   detect this: a 2m1s gap with a 10-second status interval gives `serverRetention = 2m30s`, so
+   the threshold is not yet crossed and status reports resume to a server that has no registration
+   for the node.
+
+### Decision
+
+- **Add `reconnectGracePeriod`** to `NodeDispatcherConfig` (default `Duration.ofMinutes(2)`).
+  Making it configurable keeps tests fast without hardcoding protocol constants.
+
+- **Derive `serverRetention`** from the negotiated status interval:
+  `3 × statusInterval + reconnectGracePeriod`. `3 × statusInterval` is when the server closes
+  the TCP connection; `reconnectGracePeriod` is how long the server retains the registration after
+  closing. Any gap past `serverRetention` from the last confirmed status report means the server
+  has certainly expired the session — covers process-suspension scenarios where no TCP disconnect
+  event fires.
+
+- **Detect grace-expired reconnects at the dispatcher**, using a single `IClient` state listener
+  shared across all nodes. On each `DISCONNECTED → CONNECTED` transition the gap is compared
+  against `reconnectGracePeriod`; a qualifying reconnect after the current registration triggers
+  re-registration. Covers server crashes with fast restarts where the time-based check alone
+  would not fire.
+
+- **Apply a 95% tolerance to both period thresholds.** Scheduler jitter and GC pauses of a few
+  milliseconds can otherwise hide a real outage right at the boundary. Firing slightly early
+  costs a redundant registration; firing slightly late risks sending status reports to a server
+  that has already forgotten the node.
+
+- **Drive the node lifecycle from a single loop in `NodeWrapper`** with two phases: register, then
+  run the status loop until it requests re-registration or termination. A rejected registration
+  backs off and retries without taking the node offline; either re-registration signal
+  (grace-expired reconnect or `serverRetention` exceeded) returns to the register phase.
+
+### Result
+
+Re-registration is triggered by two complementary signals. The TCP reconnect check catches server
+crashes where the connection drops and comes back after the grace period expires — even if the
+total outage is short enough that the time-based threshold would not fire. The time-based check
+covers half-open connections and process suspensions where no disconnect event is raised. Both
+checks share a single `registeredAt` anchor per registration cycle and require no per-node
+listener or cross-cutting state beyond one `AtomicReference<Instant>` in `NodeDispatcher`.

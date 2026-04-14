@@ -1,6 +1,10 @@
 package io.sapient.transmission;
 
+import static io.sapient.transmission.NodeDispatcher.withTolerance;
+
+import com.google.protobuf.Timestamp;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -12,10 +16,14 @@ import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.RegistrationAck;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 
 @Slf4j
 class NodeWrapper implements AutoCloseable {
+
+    private static final boolean REREGISTER = true;
+    private static final boolean DONE = false;
 
     @Getter @NonNull private final INode node;
     @Getter private final AtomicBoolean registered = new AtomicBoolean(false);
@@ -53,32 +61,13 @@ class NodeWrapper implements AutoCloseable {
         waitUntilOnline();
         dispatcher.onNodeOnline(node.getNodeId());
 
-        Registration registration = node.getRegistration();
-        dispatcher.publish(registration, node.getNodeId(), config.publishTimeout());
-
-        RegistrationAck ack =
-                ackQueue.poll(config.registrationAckTimeout().toMillis(), TimeUnit.MILLISECONDS);
-        if (ack == null) {
-            log.error(
-                    "registration ack timeout for node: {} after {}",
-                    node.getNodeId(),
-                    config.registrationAckTimeout());
-            throw new TimeoutException("registration ack timeout for node: " + node.getNodeId());
-        }
-        node.onRegistrationAck(ack);
-        if (!ack.getAcceptance()) return;
-        registered.set(true);
-
-        Duration statusInterval =
-                toDuration(registration.getStatusDefinition().getStatusInterval());
-        while (!Thread.currentThread().isInterrupted() && node.isOnline()) {
-            try {
-                dispatcher.publish(
-                        node.getStatusReport(), node.getNodeId(), config.publishTimeout());
-            } catch (TimeoutException e) {
-                log.error("status report publish timeout for node: {}", node.getNodeId(), e);
+        while (node.isOnline() && !Thread.currentThread().isInterrupted()) {
+            Registration registration = register();
+            if (registration == null) {
+                Thread.sleep(config.registrationAckTimeout());
+                continue;
             }
-            Thread.sleep(statusInterval);
+            if (!runStatusLoop(registration)) break;
         }
 
         if (!Thread.currentThread().isInterrupted()) {
@@ -90,6 +79,71 @@ class NodeWrapper implements AutoCloseable {
             registered.set(false);
             lastStatusReport.set(null);
         }
+    }
+
+    /**
+     * Sends a registration and waits for an ack. On acceptance, stores the timestamp from the sent
+     * message in {@link #registeredAt} so that {@link #runStatusLoop} can use it as an anchor.
+     *
+     * @return the accepted {@link Registration}, or {@code null} if rejected
+     */
+    private Instant registeredAt;
+
+    private Registration register() throws InterruptedException, TimeoutException {
+        Registration registration = node.getRegistration();
+        var sent = publish(registration);
+
+        RegistrationAck ack =
+                ackQueue.poll(config.registrationAckTimeout().toMillis(), TimeUnit.MILLISECONDS);
+        if (ack == null) {
+            log.error(
+                    "registration ack timeout for node: {} after {}",
+                    node.getNodeId(),
+                    config.registrationAckTimeout());
+            throw new TimeoutException("registration ack timeout for node: " + node.getNodeId());
+        }
+        node.onRegistrationAck(ack);
+        if (!ack.getAcceptance()) return null;
+        registered.set(true);
+        registeredAt = toInstant(sent.getTimestamp());
+        return registration;
+    }
+
+    /**
+     * Publishes status reports until the node goes offline, the thread is interrupted, or a
+     * re-registration condition is detected.
+     *
+     * @return {@code true} if re-registration is needed, {@code false} for a normal exit
+     */
+    private boolean runStatusLoop(Registration registration) throws InterruptedException {
+        var statusInterval = toDuration(registration.getStatusDefinition().getStatusInterval());
+        var grace = config.reconnectGracePeriod();
+        var serverRetention = withTolerance(statusInterval.multipliedBy(3).plus(grace));
+        Instant lastSuccessfulStatusReportAt = this.registeredAt;
+
+        while (!Thread.currentThread().isInterrupted() && node.isOnline()) {
+            if (dispatcher.reconnectedAfter(registeredAt)) {
+                log.info(
+                        "reconnected after grace period, re-registering node: {}",
+                        node.getNodeId());
+                registered.set(false);
+                return REREGISTER;
+            }
+            Instant retentionDeadline = lastSuccessfulStatusReportAt.plus(serverRetention);
+            if (!Instant.now().isBefore(retentionDeadline)) {
+                log.info("server retention expired for node: {}, re-registering", node.getNodeId());
+                registered.set(false);
+                return REREGISTER;
+            }
+            try {
+                var sent = publish(node.getStatusReport());
+                lastSuccessfulStatusReportAt = toInstant(sent.getTimestamp());
+            } catch (TimeoutException e) {
+                log.error("status report publish timeout for node: {}", node.getNodeId(), e);
+            }
+            Thread.sleep(statusInterval);
+        }
+        return DONE;
     }
 
     private void waitUntilOnline() throws InterruptedException {
@@ -117,7 +171,19 @@ class NodeWrapper implements AutoCloseable {
         if (sr.getSystem() != StatusReport.System.SYSTEM_GOODBYE) {
             sr = sr.toBuilder().setSystem(StatusReport.System.SYSTEM_GOODBYE).build();
         }
-        dispatcher.publish(sr, node.getNodeId(), config.publishTimeout());
+        publish(sr);
+    }
+
+    private SapientMessage publish(Registration r) throws TimeoutException, InterruptedException {
+        return dispatcher.publish(r, node.getNodeId(), config.publishTimeout());
+    }
+
+    private SapientMessage publish(StatusReport s) throws TimeoutException, InterruptedException {
+        return dispatcher.publish(s, node.getNodeId(), config.publishTimeout());
+    }
+
+    static Instant toInstant(Timestamp ts) {
+        return Instant.ofEpochSecond(ts.getSeconds(), ts.getNanos());
     }
 
     static Duration toDuration(Registration.Duration d) {
