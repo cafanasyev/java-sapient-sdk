@@ -35,12 +35,18 @@ public interface IClient extends AutoCloseable {
      */
     void subscribe(Consumer<SapientMessage> c);
 
-    /** Returns the current connection state. */
+    /**
+     * Returns the current connection state.
+     *
+     * @return the current {@link ConnectionState}
+     */
     ConnectionState getState();
 
     /**
      * Returns {@code true} if the current state is {@link ConnectionState#CONNECTED}. Convenience
      * shorthand for {@code getState() == ConnectionState.CONNECTED}.
+     *
+     * @return {@code true} if connected
      */
     default boolean isConnected() {
         return getState() == ConnectionState.CONNECTED;

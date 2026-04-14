@@ -6,12 +6,14 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
+import io.sapient.transport.ConnectionState;
 import io.sapient.transport.IClient;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -116,6 +118,7 @@ class NodeDispatcherTest {
                                         Duration.ofMillis(10),
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
+                                        Duration.ofMinutes(2),
                                         FUSION_NODE_ID)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
         return new Setup(dispatcher, client, node, online, onMessage, nodeId);
@@ -213,18 +216,44 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
-    void rejectedAckRetriesRegistration() throws Exception {
-        try (var s = setup(200)) {
-            s.online.set(true);
-            s.dispatcher.register(s.node);
+    void rejectedRegistrationDoesNotSpamServer() throws Exception {
+        // registrationAckTimeout = 200ms — retry must not arrive before the backoff expires
+        UUID nodeId = UUID.randomUUID();
+        AtomicBoolean online = new AtomicBoolean(true);
+        IClient client = mock(IClient.class);
+        INode node = mockNode(nodeId, online, 200);
+        NodeDispatcher dispatcher =
+                spy(
+                        new NodeDispatcher(
+                                client,
+                                new NodeDispatcherConfig(
+                                        Duration.ofMillis(10),
+                                        Duration.ofMillis(200),
+                                        Duration.ofMillis(200),
+                                        Duration.ofMinutes(2),
+                                        FUSION_NODE_ID)));
+        Consumer<SapientMessage> onMessage = captureSubscription(client);
 
-            verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
-            sendAck(s.onMessage, s.nodeId, false);
+        dispatcher.register(node);
 
-            verify(s.dispatcher, timeout(1000).atLeast(2))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
-        }
+        verify(dispatcher, timeout(1000))
+                .publish(any(Registration.class), eq(nodeId), any(Duration.class));
+        sendAck(onMessage, nodeId, false);
+
+        // immediately after rejection — no second registration yet
+        Thread.sleep(50);
+        verify(dispatcher, times(1))
+                .publish(any(Registration.class), eq(nodeId), any(Duration.class));
+
+        // node must stay in onlineNodes, not moved to offlineNodes
+        assertTrue(dispatcher.onlineNodes.containsKey(nodeId));
+        assertFalse(dispatcher.offlineNodes.containsKey(nodeId));
+
+        // after the backoff (200ms) the retry arrives
+        verify(dispatcher, timeout(1000).atLeast(2))
+                .publish(any(Registration.class), eq(nodeId), any(Duration.class));
+
+        dispatcher.close();
     }
 
     @Test
@@ -739,6 +768,7 @@ class NodeDispatcherTest {
                                         Duration.ofMillis(10),
                                         Duration.ofSeconds(5),
                                         Duration.ofMillis(100),
+                                        Duration.ofMinutes(2),
                                         FUSION_NODE_ID)));
         try (dispatcher) {
             dispatcher.register(node);
@@ -945,6 +975,7 @@ class NodeDispatcherTest {
                                         Duration.ofMillis(10),
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
+                                        Duration.ofMinutes(2),
                                         FUSION_NODE_ID)));
         try (dispatcher) {
             dispatcher.register(node1);
@@ -1011,6 +1042,7 @@ class NodeDispatcherTest {
                                         Duration.ofMillis(10),
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
+                                        Duration.ofMinutes(2),
                                         FUSION_NODE_ID)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
 
@@ -1039,6 +1071,137 @@ class NodeDispatcherTest {
         // node2 goes offline — all offline — client must close
         online2.set(false);
         verify(client, timeout(1000)).close();
+
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(5)
+    void reRegistrationAfterServerRetentionExpired() throws Exception {
+        // serverRetention = 3 × 50ms + 100ms = 250ms
+        UUID nodeId = UUID.randomUUID();
+        AtomicBoolean online = new AtomicBoolean(true);
+        IClient client = mock(IClient.class);
+        INode node = mockNode(nodeId, online, 50);
+        NodeDispatcher dispatcher =
+                spy(
+                        new NodeDispatcher(
+                                client,
+                                new NodeDispatcherConfig(
+                                        Duration.ofMillis(10),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofMillis(100),
+                                        FUSION_NODE_ID)));
+        Consumer<SapientMessage> onMessage = captureSubscription(client);
+
+        dispatcher.register(node);
+
+        verify(dispatcher, timeout(1000))
+                .publish(any(Registration.class), eq(nodeId), any(Duration.class));
+        sendAck(onMessage, nodeId, true);
+
+        verify(dispatcher, timeout(1000).atLeast(1))
+                .publish(any(StatusReport.class), eq(nodeId), any(Duration.class));
+
+        // simulate connection loss — all status report publishes now time out
+        doThrow(new TimeoutException("simulated connection loss"))
+                .when(dispatcher)
+                .publish(any(StatusReport.class), eq(nodeId), any(Duration.class));
+
+        // after serverRetention (250ms) a second registration must be sent
+        verify(dispatcher, timeout(2000).atLeast(2))
+                .publish(any(Registration.class), eq(nodeId), any(Duration.class));
+
+        dispatcher.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    static BiConsumer<ConnectionState, Instant> captureStateListener(IClient client) {
+        ArgumentCaptor<BiConsumer<ConnectionState, Instant>> captor =
+                ArgumentCaptor.forClass(BiConsumer.class);
+        verify(client).addStateChangeListener(captor.capture());
+        return captor.getValue();
+    }
+
+    @Test
+    @Timeout(5)
+    void reRegistrationAfterReconnectExceedingGracePeriod() throws Exception {
+        // grace period = 100ms; disconnect gap = 150ms → must re-register
+        UUID nodeId = UUID.randomUUID();
+        AtomicBoolean online = new AtomicBoolean(true);
+        IClient client = mock(IClient.class);
+        INode node = mockNode(nodeId, online, 50);
+        NodeDispatcher dispatcher =
+                spy(
+                        new NodeDispatcher(
+                                client,
+                                new NodeDispatcherConfig(
+                                        Duration.ofMillis(10),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofMillis(100),
+                                        FUSION_NODE_ID)));
+        Consumer<SapientMessage> onMessage = captureSubscription(client);
+        BiConsumer<ConnectionState, Instant> stateListener = captureStateListener(client);
+
+        dispatcher.register(node);
+
+        verify(dispatcher, timeout(1000))
+                .publish(any(Registration.class), eq(nodeId), any(Duration.class));
+        sendAck(onMessage, nodeId, true);
+        verify(dispatcher, timeout(1000).atLeast(1))
+                .publish(any(StatusReport.class), eq(nodeId), any(Duration.class));
+
+        // simulate: disconnect then reconnect after 150ms (> 100ms grace period)
+        Instant lost = Instant.now();
+        stateListener.accept(ConnectionState.DISCONNECTED, lost);
+        stateListener.accept(ConnectionState.CONNECTED, lost.plusMillis(150));
+
+        verify(dispatcher, timeout(1000).atLeast(2))
+                .publish(any(Registration.class), eq(nodeId), any(Duration.class));
+
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(5)
+    void noReRegistrationAfterReconnectWithinGracePeriod() throws Exception {
+        // grace period = 100ms; disconnect gap = 50ms → must NOT re-register
+        UUID nodeId = UUID.randomUUID();
+        AtomicBoolean online = new AtomicBoolean(true);
+        IClient client = mock(IClient.class);
+        INode node = mockNode(nodeId, online, 50);
+        NodeDispatcher dispatcher =
+                spy(
+                        new NodeDispatcher(
+                                client,
+                                new NodeDispatcherConfig(
+                                        Duration.ofMillis(10),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofMillis(100),
+                                        FUSION_NODE_ID)));
+        Consumer<SapientMessage> onMessage = captureSubscription(client);
+        BiConsumer<ConnectionState, Instant> stateListener = captureStateListener(client);
+
+        dispatcher.register(node);
+
+        verify(dispatcher, timeout(1000))
+                .publish(any(Registration.class), eq(nodeId), any(Duration.class));
+        sendAck(onMessage, nodeId, true);
+        verify(dispatcher, timeout(1000).atLeast(1))
+                .publish(any(StatusReport.class), eq(nodeId), any(Duration.class));
+
+        // simulate: disconnect then reconnect after 50ms (< 100ms grace period)
+        Instant lost = Instant.now();
+        stateListener.accept(ConnectionState.DISCONNECTED, lost);
+        stateListener.accept(ConnectionState.CONNECTED, lost.plusMillis(50));
+
+        // only the original registration — no re-registration within 500ms
+        Thread.sleep(500);
+        verify(dispatcher, times(1))
+                .publish(any(Registration.class), eq(nodeId), any(Duration.class));
 
         dispatcher.close();
     }

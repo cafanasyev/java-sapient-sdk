@@ -19,9 +19,17 @@ public interface SocketProvider {
      */
     Socket get() throws IOException;
 
-    /** Returns the hostname or IP address of the remote endpoint. */
+    /**
+     * Returns the hostname or IP address of the remote endpoint.
+     *
+     * @return the remote hostname or IP address
+     */
     String host();
 
-    /** Returns the TCP port of the remote endpoint. */
+    /**
+     * Returns the TCP port of the remote endpoint.
+     *
+     * @return the remote TCP port
+     */
     int port();
 }
