@@ -119,7 +119,12 @@ class NodeWrapper implements AutoCloseable {
     private void runStatusLoop(Registration registration) throws InterruptedException {
         var statusInterval = toDuration(registration.getStatusDefinition().getStatusInterval());
         var grace = config.reconnectGracePeriod();
-        var serverRetention = withTolerance(statusInterval.multipliedBy(3).plus(grace));
+        var serverRetention =
+                withTolerance(
+                        statusInterval
+                                .multipliedBy(3)
+                                .plus(grace)
+                                .minus(config.connectionLossDetectionDelay()));
         Instant lastSuccessfulStatusReportAt = Instant.now();
 
         while (node.isOnline() && !Thread.currentThread().isInterrupted()) {

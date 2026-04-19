@@ -2,11 +2,22 @@ package io.sapient.transport;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.spy;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.time.Duration;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntSupplier;
 import org.junit.jupiter.api.Test;
@@ -56,7 +67,10 @@ class SocketClientTest {
 
     private static SocketClient newClient(
             SocketProvider provider, ArrayBlockingQueue<SapientMessage> received) {
-        SocketClient client = new SocketClient(provider);
+        SocketClient client = spy(new SocketClient(provider));
+        // bypass probe-before-connect so TestServer's single accept() is consumed by
+        // the real client rather than by the probe
+        doReturn(true).when(client).probeReachable(any(Duration.class));
         client.subscribe(received::offer);
         return client;
     }
@@ -81,6 +95,103 @@ class SocketClientTest {
             client.publish(CLIENT_MESSAGE, Duration.ofSeconds(3));
             assertEquals(CLIENT_MESSAGE, server.getClientMessages().poll(3, SECONDS));
         }
+    }
+
+    @Test
+    @Timeout(5)
+    void testWatchdogDetectsUnreachableServerAndClosesConnection() throws Exception {
+        var serverSocket = new ServerSocket(0);
+        int port = serverSocket.getLocalPort();
+
+        var provider =
+                new TestSocketProvider(
+                        "localhost", () -> port, () -> new Socket("localhost", port));
+        var states = new LinkedBlockingQueue<ConnectionState>();
+        // 100ms watchdog interval and 200ms probe timeout — the watchdog must detect
+        // the server being gone and tear the connection down within the test's 5s budget,
+        // without any reliance on SO_TIMEOUT.
+        var client =
+                spy(
+                        new SocketClient(
+                                provider,
+                                Duration.ofMillis(200),
+                                Duration.ofMillis(10),
+                                Duration.ofMillis(100)));
+        // stateful stub: true lets the client reach the server's single accept();
+        // flipping to false simulates the server becoming unreachable for the watchdog
+        var probeAlive = new AtomicBoolean(true);
+        doAnswer(inv -> probeAlive.get()).when(client).probeReachable(any(Duration.class));
+        client.addStateChangeListener((s, ts) -> states.add(s));
+
+        try (client) {
+            client.start();
+            assertEquals(ConnectionState.CONNECTING, states.poll(2, SECONDS));
+
+            // accept and send a greeting to prove the connection works
+            Socket accepted = serverSocket.accept();
+            writeFramed(accepted.getOutputStream(), TestServer.GREETING.toByteArray());
+
+            assertEquals(ConnectionState.CONNECTED, states.poll(2, SECONDS));
+
+            // simulate the server becoming unreachable. readLoop stays blocked on the
+            // still-open TCP socket; the watchdog is the only mechanism that can notice.
+            // When the next probe returns false the watchdog closes the socket, which
+            // unblocks readLoop and fires DISCONNECTED.
+            probeAlive.set(false);
+
+            assertEquals(ConnectionState.DISCONNECTED, states.poll(2, SECONDS));
+            accepted.close();
+            serverSocket.close();
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void testNoStateChurnWhenServerUnreachable() throws Exception {
+        // grab an ephemeral port, release it, and point the client at it so every
+        // probe fails. runLoop must stay in DISCONNECTED — no CONNECTING or
+        // repeat-DISCONNECTED events — until the server becomes reachable.
+        ServerSocket tmp = new ServerSocket(0);
+        int port = tmp.getLocalPort();
+        tmp.close();
+
+        var provider =
+                new TestSocketProvider(
+                        "localhost", () -> port, () -> new Socket("localhost", port));
+        var states = new LinkedBlockingQueue<ConnectionState>();
+        var client =
+                new SocketClient(
+                        provider,
+                        Duration.ofMillis(100),
+                        Duration.ofMillis(10),
+                        Duration.ofSeconds(10));
+        client.addStateChangeListener((s, ts) -> states.add(s));
+
+        try (client) {
+            client.start();
+            // plenty of time for many would-be reconnect cycles
+            Thread.sleep(500);
+
+            // no CONNECTING should have been emitted while probes kept failing
+            assertFalse(
+                    states.contains(ConnectionState.CONNECTING),
+                    "probe-before-connect must suppress CONNECTING while server is unreachable");
+            // and no DISCONNECTED either — initial state is DISCONNECTED and setState is
+            // a no-op when the state does not change
+            assertFalse(
+                    states.contains(ConnectionState.DISCONNECTED),
+                    "no spurious DISCONNECTED transitions while server is unreachable");
+        }
+    }
+
+    private static void writeFramed(OutputStream out, byte[] data) throws IOException {
+        out.write(
+                ByteBuffer.allocate(4 + data.length)
+                        .order(ByteOrder.LITTLE_ENDIAN)
+                        .putInt(data.length)
+                        .put(data)
+                        .array());
+        out.flush();
     }
 
     @Test

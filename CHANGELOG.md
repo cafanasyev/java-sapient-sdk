@@ -146,3 +146,73 @@ total outage is short enough that the time-based threshold would not fire. The t
 covers half-open connections and process suspensions where no disconnect event is raised. Both
 checks share a single `registrationEpoch` anchor per registration cycle and require no per-node
 listener or cross-cutting state beyond one `AtomicLong` in `NodeDispatcher`.
+
+---
+
+## 4 — Accounting for connection-loss detection delay
+
+### Problem
+
+Both re-registration checks from §3 assume the client notices loss of connection instantly. It
+doesn't. On a half-open socket (server silently gone, no FIN), `readLoop` stays blocked inside
+`InputStream.read()` until something wakes it up. Until it wakes, the dispatcher sees the
+connection as `CONNECTED` and the status loop keeps "publishing" into a dead TCP send buffer —
+the writes succeed locally but the server has already purged the registration.
+
+The obvious wake-up mechanism is `SO_TIMEOUT`. In practice it is not reliable enough to anchor
+the design on:
+
+- On `SSLSocket`, `SO_TIMEOUT` applies to the underlying raw socket, not the TLS record stream.
+  Partial TLS records can keep the read in native code long past the configured timeout.
+- `InputStream.read()` honours `SO_TIMEOUT` per call, not per logical message. `readFully` loops
+  `read()` until all bytes arrive, so a slow trickle of bytes resets the timer on every call and
+  the effective timeout becomes unbounded.
+- Empirically, with `SO_TIMEOUT = 10s` the loop sometimes only woke up after 30–40s, which is
+  enough to push both re-registration checks past their respective windows and either drop a
+  real outage signal or miscalibrate the server-retention deadline.
+
+The two re-registration checks both under-counted this gap:
+
+- **Dispatcher-side (`DISCONNECTED → CONNECTED` gap)**: the measured gap starts from when the
+  client emitted `DISCONNECTED`, not from when the network actually failed. A real 2m1s outage
+  with a detection delay of 5s looks like a 1m56s gap — below the 2-minute grace, so no epoch
+  bump.
+
+- **Node-side (`serverRetention` deadline)**: `3 × statusInterval + reconnectGracePeriod` is
+  measured from the last *attempted* status report. Some of those attempts went to a dead socket
+  that the client hadn't yet marked dead, so the effective deadline was later than the server's
+  actual retention window.
+
+### Decision
+
+- **Detect liveness from a dedicated watchdog, not from `readLoop`.** `SocketClient` starts a
+  virtual-thread watchdog for every successful connection. The watchdog wakes at a fixed
+  `watchdogInterval`, runs `probeReachable(probeTimeout)`, and — on probe failure — closes the
+  underlying socket. Closing the socket unblocks the pending `InputStream.read()` with an
+  `IOException`, which surfaces to `runLoop` and drives the `DISCONNECTED` transition through the
+  existing path. Detection is bounded by `watchdogInterval + probeTimeout` regardless of whether
+  `SO_TIMEOUT` is set, whether the socket is plain or TLS, or whether bytes are trickling in. The
+  watchdog is interrupted when `runLoop` exits its connection cycle.
+
+- **Make `probeTimeout`, `initialReconnectDelay`, and `watchdogInterval` configurable** on
+  `SocketClient` via a new constructor. Defaults (2s probe, 1s initial reconnect delay, 10s
+  watchdog interval) preserve reasonable production behaviour. `initialReconnectDelay` is the
+  base for linear backoff: attempt N waits `min(N, 10) × initialReconnectDelay`.
+
+- **Add `connectionLossDetectionDelay`** to `NodeDispatcherConfig`, representing the worst-case
+  time between actual network loss and the client emitting `DISCONNECTED`. Computed as
+  `watchdogInterval + probeTimeout`. Applied in both places the gap is measured:
+
+  - **Dispatcher-side**: added to the `DISCONNECTED → CONNECTED` gap before comparing against
+    `reconnectGracePeriod`. Inflates the measured gap to match the real outage duration.
+
+  - **Node-side**: subtracted from the `serverRetention` deadline in the status loop. Brings the
+    client-side deadline back in line with the server's actual retention window.
+
+### Result
+
+Disconnect detection is decoupled from the read path and from `SO_TIMEOUT`'s quirks. A half-open
+TCP connection on an otherwise-silent link is detected within `watchdogInterval + probeTimeout`
+of the network failure — a bound set entirely by the client's own scheduling, not by kernel or
+SSL-layer behaviour. Both re-registration checks are calibrated against that worst-case
+detection delay rather than the instant the client happened to notice.
