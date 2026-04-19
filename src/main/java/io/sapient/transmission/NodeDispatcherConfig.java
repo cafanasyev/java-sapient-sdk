@@ -12,8 +12,13 @@ import lombok.NonNull;
  * @param registrationAckTimeout timeout for waiting for a {@code RegistrationAck} after sending a
  *     {@code Registration}
  * @param reconnectGracePeriod how long the server retains a registration after closing the TCP
- *     connection due to missed status reports (BSI Flex 335 v2.0 §4.9); combined with {@code 3 ×
- *     statusInterval} to derive the full server-side retention window
+ *     connection due to missed status reports (BSI Flex 335 v2.0 §4.9)
+ * @param connectionLossDetectionDelay worst-case time between actual network loss and the client
+ *     detecting it. Compute as {@code SocketClient watchdogInterval + probeTimeout}: the watchdog
+ *     fires a reachability probe every {@code watchdogInterval}, and each probe blocks for up to
+ *     {@code probeTimeout} before declaring the connection dead. Subtracted from the server
+ *     retention window to account for status reports that were "published" into a dead TCP buffer
+ *     before the watchdog noticed.
  * @param destinationId the fusion node recipient for all outbound messages
  */
 public record NodeDispatcherConfig(
@@ -21,6 +26,7 @@ public record NodeDispatcherConfig(
         @NonNull Duration publishTimeout,
         @NonNull Duration registrationAckTimeout,
         @NonNull Duration reconnectGracePeriod,
+        @NonNull Duration connectionLossDetectionDelay,
         @NonNull UUID destinationId) {
 
     private static final Duration DEFAULT_ONLINE_CHECK_INTERVAL = Duration.ofSeconds(5);
@@ -41,6 +47,18 @@ public record NodeDispatcherConfig(
                 DEFAULT_PUBLISH_TIMEOUT,
                 DEFAULT_REGISTRATION_ACK_TIMEOUT,
                 DEFAULT_RECONNECT_GRACE_PERIOD,
+                Duration.ZERO,
+                destinationId);
+    }
+
+    public NodeDispatcherConfig withConnectionLossDetectionDelay(
+            @NonNull Duration connectionLossDetectionDelay) {
+        return new NodeDispatcherConfig(
+                onlineCheckInterval,
+                publishTimeout,
+                registrationAckTimeout,
+                reconnectGracePeriod,
+                connectionLossDetectionDelay,
                 destinationId);
     }
 }

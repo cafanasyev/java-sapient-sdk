@@ -83,13 +83,20 @@ public class NodeDispatcher implements INodeDispatcher {
 
     private void onClientStateChange(ConnectionState newState, Instant ts) {
         if (newState == ConnectionState.DISCONNECTED) {
-            disconnectedAt.set(ts);
+            // capture only the first DISCONNECTED of an outage. Subsequent DISCONNECTED
+            // events emitted from failed reconnect cycles must not overwrite it —
+            // otherwise the measured gap shrinks to the latest retry window and the
+            // grace-period check never fires for long outages.
+            disconnectedAt.compareAndSet(null, ts);
         } else if (newState == ConnectionState.CONNECTED) {
             Instant lost = disconnectedAt.getAndSet(null);
             if (lost == null) return;
-            Duration gap = Duration.between(lost, ts);
-            if (gap.compareTo(withTolerance(config.reconnectGracePeriod())) >= 0) {
+            Duration disconnected =
+                    Duration.between(lost, ts).plus(config.connectionLossDetectionDelay());
+            log.info("disconnect duration {}", disconnected);
+            if (disconnected.compareTo(withTolerance(config.reconnectGracePeriod())) >= 0) {
                 reregistrationEpoch.incrementAndGet();
+                log.warn("disconnected longer than {}", config.reconnectGracePeriod());
             }
         }
     }

@@ -49,12 +49,16 @@ public class SocketClient implements IClient {
         @Override
         public void close() {
             log.info("closing socket");
-            try {
-                socket.close();
-            } catch (IOException e) {
-                log.error("failed to close socket", e);
-            }
-            log.info("socket closed");
+            // SSLSocket.close() can block on a dead TLS connection; don't wait for it.
+            Thread.startVirtualThread(
+                    () -> {
+                        try {
+                            socket.close();
+                            log.info("socket closed");
+                        } catch (IOException e) {
+                            log.error("failed to close socket", e);
+                        }
+                    });
         }
 
         private boolean isConnected() {
@@ -62,7 +66,14 @@ public class SocketClient implements IClient {
         }
     }
 
+    private static final Duration DEFAULT_PROBE_TIMEOUT = Duration.ofSeconds(2);
+    private static final Duration DEFAULT_INITIAL_RECONNECT_DELAY = Duration.ofSeconds(1);
+    private static final Duration DEFAULT_WATCHDOG_INTERVAL = Duration.ofSeconds(10);
+
     private final SocketProvider socketProvider;
+    private final Duration probeTimeout;
+    private final Duration initialReconnectDelay;
+    private final Duration watchdogInterval;
 
     /**
      * Creates a client that obtains connections from the given provider.
@@ -70,7 +81,34 @@ public class SocketClient implements IClient {
      * @param socketProvider supplies new socket connections and describes the remote address
      */
     public SocketClient(@NonNull SocketProvider socketProvider) {
+        this(
+                socketProvider,
+                DEFAULT_PROBE_TIMEOUT,
+                DEFAULT_INITIAL_RECONNECT_DELAY,
+                DEFAULT_WATCHDOG_INTERVAL);
+    }
+
+    /**
+     * Creates a client with configurable timeouts.
+     *
+     * @param socketProvider supplies new socket connections and describes the remote address
+     * @param probeTimeout timeout for reachability probes (applies to both watchdog probes and the
+     *     public {@link #probeReachable(Duration)} call)
+     * @param initialReconnectDelay base delay for the first reconnect attempt; scaled linearly by
+     *     attempt count (capped at 10x)
+     * @param watchdogInterval how often the watchdog runs a reachability probe while the connection
+     *     is established. Detection of a silently-dead peer is bounded by {@code watchdogInterval +
+     *     probeTimeout}
+     */
+    public SocketClient(
+            @NonNull SocketProvider socketProvider,
+            @NonNull Duration probeTimeout,
+            @NonNull Duration initialReconnectDelay,
+            @NonNull Duration watchdogInterval) {
         this.socketProvider = socketProvider;
+        this.probeTimeout = probeTimeout;
+        this.initialReconnectDelay = initialReconnectDelay;
+        this.watchdogInterval = watchdogInterval;
     }
 
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -98,12 +136,24 @@ public class SocketClient implements IClient {
         long reconnectAttempts = 0;
 
         while (running.get()) {
+            // probe before attempting a real connection. If the server is not
+            // reachable we stay silent — no CONNECTING → DISCONNECTED churn for
+            // listeners to chew on, which also means the dispatcher records the
+            // outage start at the moment the connection actually died rather than
+            // at the latest failed retry.
+            if (!probeReachable(probeTimeout)) {
+                sleepBeforeReconnect(++reconnectAttempts);
+                continue;
+            }
+
             log.info("initializing new server connection");
             setState(ConnectionState.CONNECTING);
 
+            Thread watchdog = null;
             try (Connection conn = connect()) {
                 reconnectAttempts = 0;
                 setState(ConnectionState.CONNECTED);
+                watchdog = startWatchdog(conn);
                 readLoop(conn);
             } catch (EOFException e) {
                 if (running.get()) {
@@ -113,26 +163,32 @@ public class SocketClient implements IClient {
                 if (running.get()) {
                     log.error("server connection failure", e);
                 }
+            } finally {
+                if (watchdog != null) {
+                    watchdog.interrupt();
+                }
+                setState(ConnectionState.DISCONNECTED);
             }
 
             if (!running.get()) {
                 break;
             }
 
-            setState(ConnectionState.DISCONNECTED);
-
-            long delay = Math.min(++reconnectAttempts, 10);
-
-            log.info("sleep {}s before reconnecting to the server", delay);
-
-            try {
-                TimeUnit.SECONDS.sleep(delay);
-            } catch (InterruptedException e) {
-                log.info("reconnect sleep interrupted", e);
-            }
+            sleepBeforeReconnect(++reconnectAttempts);
         }
 
         log.info("client stopped gracefully");
+    }
+
+    private void sleepBeforeReconnect(long reconnectAttempts) {
+        long multiplier = Math.min(reconnectAttempts, 10);
+        Duration delay = initialReconnectDelay.multipliedBy(multiplier);
+        log.info("sleep {} before reconnecting to the server", delay);
+        try {
+            Thread.sleep(delay.toMillis());
+        } catch (InterruptedException e) {
+            log.info("reconnect sleep interrupted", e);
+        }
     }
 
     @Override
@@ -256,7 +312,7 @@ public class SocketClient implements IClient {
                     new InetSocketAddress(socketProvider.host(), socketProvider.port()),
                     (int) timeout.toMillis());
             return true;
-        } catch (IOException e) {
+        } catch (IOException | IllegalArgumentException e) {
             return false;
         }
     }
@@ -294,7 +350,7 @@ public class SocketClient implements IClient {
     private void readLoop(Connection connection) throws IOException {
         byte[] lenBuf = new byte[4];
 
-        while (connection.isConnected()) {
+        while (running.get()) {
             readFully(connection.in, lenBuf, 4);
             int len = ByteBuffer.wrap(lenBuf).order(ByteOrder.LITTLE_ENDIAN).getInt();
             byte[] msgBuf = new byte[len];
@@ -309,6 +365,35 @@ public class SocketClient implements IClient {
                 }
             }
         }
+    }
+
+    /**
+     * Watches the connection by periodically running a reachability probe independently of the read
+     * path. On failure the watchdog closes the socket, which unblocks {@link #readLoop} (via {@code
+     * IOException}) and drives the {@link ConnectionState#DISCONNECTED} transition in {@link
+     * #runLoop}. This removes any reliance on {@code SO_TIMEOUT} firing promptly in {@link
+     * java.io.InputStream#read()}, which is not reliable on SSL sockets or when data trickles in
+     * slowly.
+     */
+    private Thread startWatchdog(Connection conn) {
+        return Thread.startVirtualThread(
+                () -> {
+                    while (running.get() && !Thread.currentThread().isInterrupted()) {
+                        try {
+                            Thread.sleep(watchdogInterval);
+                        } catch (InterruptedException e) {
+                            return;
+                        }
+                        if (!running.get() || Thread.currentThread().isInterrupted()) {
+                            return;
+                        }
+                        if (!probeReachable(probeTimeout)) {
+                            log.warn("watchdog probe failed, closing connection");
+                            conn.close();
+                            return;
+                        }
+                    }
+                });
     }
 
     private void readFully(InputStream in, byte[] buf, int count) throws IOException {

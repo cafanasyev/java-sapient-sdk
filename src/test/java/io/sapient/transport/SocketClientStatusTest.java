@@ -3,7 +3,10 @@ package io.sapient.transport;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -73,7 +76,8 @@ class SocketClientStatusTest {
         var server = new TestServer();
         Thread.startVirtualThread(server);
         var states = new LinkedBlockingQueue<ConnectionState>();
-        var client = new SocketClient(plainProvider(server.getLocalPort()));
+        var client = spy(new SocketClient(plainProvider(server.getLocalPort())));
+        doReturn(true).when(client).probeReachable(any(Duration.class));
         client.addStateChangeListener((s, ts) -> states.add(s));
 
         try (server;
@@ -92,7 +96,8 @@ class SocketClientStatusTest {
         var server = new TestServer();
         Thread.startVirtualThread(server);
         var states = new LinkedBlockingQueue<ConnectionState>();
-        var client = new SocketClient(plainProvider(server.getLocalPort()));
+        var client = spy(new SocketClient(plainProvider(server.getLocalPort())));
+        doReturn(true).when(client).probeReachable(any(Duration.class));
         client.addStateChangeListener((s, ts) -> states.add(s));
 
         try (client) {
@@ -141,7 +146,8 @@ class SocketClientStatusTest {
         var server = new TestServer();
         Thread.startVirtualThread(server);
         var states = new LinkedBlockingQueue<ConnectionState>();
-        var client = new SocketClient(plainProvider(server.getLocalPort()));
+        var client = spy(new SocketClient(plainProvider(server.getLocalPort())));
+        doReturn(true).when(client).probeReachable(any(Duration.class));
 
         client.addStateChangeListener(
                 (s, ts) -> {

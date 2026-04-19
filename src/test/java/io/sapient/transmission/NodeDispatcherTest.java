@@ -2,17 +2,31 @@ package io.sapient.transmission;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
 import io.sapient.transport.ConnectionState;
 import io.sapient.transport.IClient;
+import io.sapient.transport.SocketClient;
+import io.sapient.transport.SocketProvider;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
@@ -119,6 +133,7 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
                                         Duration.ofMinutes(2),
+                                        Duration.ZERO,
                                         FUSION_NODE_ID)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
         return new Setup(dispatcher, client, node, online, onMessage, nodeId);
@@ -231,6 +246,7 @@ class NodeDispatcherTest {
                                         Duration.ofMillis(200),
                                         Duration.ofMillis(200),
                                         Duration.ofMinutes(2),
+                                        Duration.ZERO,
                                         FUSION_NODE_ID)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
 
@@ -769,6 +785,7 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofMillis(100),
                                         Duration.ofMinutes(2),
+                                        Duration.ZERO,
                                         FUSION_NODE_ID)));
         try (dispatcher) {
             dispatcher.register(node);
@@ -976,6 +993,7 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
                                         Duration.ofMinutes(2),
+                                        Duration.ZERO,
                                         FUSION_NODE_ID)));
         try (dispatcher) {
             dispatcher.register(node1);
@@ -1043,6 +1061,7 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
                                         Duration.ofMinutes(2),
+                                        Duration.ZERO,
                                         FUSION_NODE_ID)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
 
@@ -1092,6 +1111,7 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
                                         Duration.ofMillis(100),
+                                        Duration.ZERO,
                                         FUSION_NODE_ID)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
 
@@ -1141,6 +1161,7 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
                                         Duration.ofMillis(100),
+                                        Duration.ZERO,
                                         FUSION_NODE_ID)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
         BiConsumer<ConnectionState, Instant> stateListener = captureStateListener(client);
@@ -1166,6 +1187,73 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(5)
+    void reRegistrationAfterOutageInterruptedByFailedReconnectCycles() throws Exception {
+        // Regression: SocketClient.runLoop emits DISCONNECTED on every failed reconnect
+        // cycle (finally block runs each iteration). If the dispatcher overwrites
+        // disconnectedAt on every DISCONNECTED, only the gap between the LAST
+        // DISCONNECTED and the eventual CONNECTED is measured — which is tiny and
+        // below the grace period, so the epoch would never bump even for a long outage.
+        // The real outage here is 200ms (> 100ms grace) and must trigger re-registration.
+        UUID nodeId = UUID.randomUUID();
+        AtomicBoolean online = new AtomicBoolean(true);
+        IClient client = mock(IClient.class);
+        INode node = mockNode(nodeId, online, 50);
+        NodeDispatcher dispatcher =
+                spy(
+                        new NodeDispatcher(
+                                client,
+                                new NodeDispatcherConfig(
+                                        Duration.ofMillis(10),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofMillis(100),
+                                        Duration.ZERO,
+                                        FUSION_NODE_ID)));
+        Consumer<SapientMessage> onMessage = captureSubscription(client);
+        BiConsumer<ConnectionState, Instant> stateListener = captureStateListener(client);
+
+        dispatcher.register(node);
+
+        verify(dispatcher, timeout(1000))
+                .publish(any(Registration.class), eq(nodeId), any(Duration.class));
+        sendAck(onMessage, nodeId, true);
+        verify(dispatcher, timeout(1000).atLeast(1))
+                .publish(any(StatusReport.class), eq(nodeId), any(Duration.class));
+
+        long epochBefore = dispatcher.reregistrationEpoch();
+
+        // Outage spans 200ms (> 100ms grace), broken up by two failed reconnect
+        // attempts, each of which emits DISCONNECTED again when the try-with-resources
+        // unwinds. Intermediate DISCONNECTED/CONNECTING events must not bump the epoch —
+        // only the final CONNECTED event (which crosses the grace period) may bump it.
+        Instant lost = Instant.now();
+        stateListener.accept(ConnectionState.DISCONNECTED, lost);
+        assertEquals(epochBefore, dispatcher.reregistrationEpoch(), "DISCONNECTED must not bump");
+        stateListener.accept(ConnectionState.CONNECTING, lost.plusMillis(50));
+        assertEquals(epochBefore, dispatcher.reregistrationEpoch(), "CONNECTING must not bump");
+        stateListener.accept(ConnectionState.DISCONNECTED, lost.plusMillis(60));
+        assertEquals(
+                epochBefore,
+                dispatcher.reregistrationEpoch(),
+                "intermediate DISCONNECTED must not bump");
+        stateListener.accept(ConnectionState.CONNECTING, lost.plusMillis(150));
+        assertEquals(epochBefore, dispatcher.reregistrationEpoch(), "CONNECTING must not bump");
+        stateListener.accept(ConnectionState.DISCONNECTED, lost.plusMillis(160));
+        assertEquals(
+                epochBefore,
+                dispatcher.reregistrationEpoch(),
+                "intermediate DISCONNECTED must not bump");
+        stateListener.accept(ConnectionState.CONNECTED, lost.plusMillis(200));
+        assertEquals(
+                epochBefore + 1,
+                dispatcher.reregistrationEpoch(),
+                "epoch must bump exactly once on CONNECTED crossing the grace period");
+
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(5)
     void noReRegistrationAfterReconnectWithinGracePeriod() throws Exception {
         // grace period = 100ms; disconnect gap = 50ms → must NOT re-register
         UUID nodeId = UUID.randomUUID();
@@ -1181,6 +1269,7 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
                                         Duration.ofMillis(100),
+                                        Duration.ZERO,
                                         FUSION_NODE_ID)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
         BiConsumer<ConnectionState, Instant> stateListener = captureStateListener(client);
@@ -1204,6 +1293,91 @@ class NodeDispatcherTest {
                 .publish(any(Registration.class), eq(nodeId), any(Duration.class));
 
         dispatcher.close();
+    }
+
+    @Test
+    @Timeout(10)
+    void reRegistrationWhenDetectionDelayPushesGapOverGracePeriod() throws Exception {
+        // Closing server1 with its accepted socket still alive leaves readLoop blocked on
+        // a half-open TCP connection. The SocketClient watchdog (100ms interval) is the only
+        // thing that can detect the server is gone: next probe fails → watchdog closes the
+        // socket → readLoop wakes → DISCONNECTED. On reconnect, connectionLossDetectionDelay
+        // (150ms) added to the raw gap crosses the 100ms grace → epoch bumps → re-register.
+        UUID nodeId = UUID.randomUUID();
+        INode node = mockNode(nodeId, new AtomicBoolean(true), 50);
+
+        ServerSocket server1 = new ServerSocket(0);
+        AtomicInteger port = new AtomicInteger(server1.getLocalPort());
+        SocketClient client =
+                spy(
+                        new SocketClient(
+                                socketProvider(port),
+                                Duration.ofMillis(200),
+                                Duration.ofMillis(10),
+                                Duration.ofMillis(100)));
+        LinkedBlockingQueue<ConnectionState> states = new LinkedBlockingQueue<>();
+        client.addStateChangeListener((s, ts) -> states.add(s));
+        BlockingQueue<SapientMessage> registrations = new LinkedBlockingQueue<>();
+        Thread.startVirtualThread(() -> runTestServer(server1, nodeId, registrations));
+
+        try (NodeDispatcher dispatcher =
+                        new NodeDispatcher(
+                                client,
+                                new NodeDispatcherConfig(
+                                        Duration.ofMillis(10),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofMillis(100),
+                                        Duration.ofMillis(150),
+                                        FUSION_NODE_ID));
+                ServerSocket server2 = new ServerSocket(0)) {
+            dispatcher.register(node);
+            assertNotNull(registrations.poll(3, TimeUnit.SECONDS), "initial registration");
+            long epochBefore = dispatcher.reregistrationEpoch();
+
+            server1.close();
+            assertTrue(
+                    drainUntil(states, ConnectionState.DISCONNECTED),
+                    "expected DISCONNECTED state");
+            // the watchdog is the sole driver of disconnect detection on a half-open socket —
+            // asserting it ran at least once confirms the expected path was exercised
+            verify(client, timeout(3000).atLeastOnce()).probeReachable(any(Duration.class));
+
+            Thread.startVirtualThread(() -> runTestServer(server2, nodeId, registrations));
+            port.set(server2.getLocalPort());
+
+            assertNotNull(
+                    registrations.poll(5, TimeUnit.SECONDS), "re-registration after reconnect");
+            assertTrue(dispatcher.reregistrationEpoch() > epochBefore, "epoch should increment");
+        }
+    }
+
+    private static SocketProvider socketProvider(AtomicInteger port) {
+        return new SocketProvider() {
+            @Override
+            public Socket get() throws IOException {
+                return new Socket("localhost", port.get());
+            }
+
+            @Override
+            public String host() {
+                return "localhost";
+            }
+
+            @Override
+            public int port() {
+                return port.get();
+            }
+        };
+    }
+
+    private static boolean drainUntil(BlockingQueue<ConnectionState> states, ConnectionState target)
+            throws InterruptedException {
+        ConnectionState s;
+        while ((s = states.poll(3, TimeUnit.SECONDS)) != null) {
+            if (s == target) return true;
+        }
+        return false;
     }
 
     @Test
@@ -1231,5 +1405,54 @@ class NodeDispatcherTest {
 
             verify(s.client, timeout(2000).times(2)).start();
         }
+    }
+
+    private static void runTestServer(
+            ServerSocket serverSocket, UUID nodeId, BlockingQueue<SapientMessage> registrations) {
+        // loop-accept: SocketClient's probe-before-connect opens and immediately closes
+        // a TCP connection, which would otherwise consume the single accept intended
+        // for the real client
+        while (!serverSocket.isClosed()) {
+            try (Socket s = serverSocket.accept()) {
+                InputStream in = s.getInputStream();
+                OutputStream out = s.getOutputStream();
+                byte[] lenBuf = new byte[4];
+                while (readFully(in, lenBuf, 4)) {
+                    int len = ByteBuffer.wrap(lenBuf).order(ByteOrder.LITTLE_ENDIAN).getInt();
+                    byte[] buf = new byte[len];
+                    if (!readFully(in, buf, len)) break;
+                    SapientMessage msg = SapientMessage.parseFrom(buf);
+                    if (msg.getContentCase() != SapientMessage.ContentCase.REGISTRATION) continue;
+                    registrations.offer(msg);
+                    SapientMessage ack =
+                            SapientMessage.newBuilder()
+                                    .setNodeId(FUSION_NODE_ID.toString())
+                                    .setDestinationId(nodeId.toString())
+                                    .setRegistrationAck(
+                                            RegistrationAck.newBuilder().setAcceptance(true))
+                                    .build();
+                    byte[] ackBytes = ack.toByteArray();
+                    out.write(
+                            ByteBuffer.allocate(4 + ackBytes.length)
+                                    .order(ByteOrder.LITTLE_ENDIAN)
+                                    .putInt(ackBytes.length)
+                                    .put(ackBytes)
+                                    .array());
+                    out.flush();
+                }
+            } catch (IOException e) {
+                // socket closed by the test or probe — loop back to accept the next one
+            }
+        }
+    }
+
+    private static boolean readFully(InputStream in, byte[] buf, int count) throws IOException {
+        int total = 0;
+        while (total < count) {
+            int n = in.read(buf, total, count - total);
+            if (n < 0) return false;
+            total += n;
+        }
+        return true;
     }
 }

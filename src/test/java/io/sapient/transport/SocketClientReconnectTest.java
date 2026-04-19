@@ -32,11 +32,14 @@ class SocketClientReconnectTest {
 
     private final ArrayBlockingQueue<SapientMessage> received = new ArrayBlockingQueue<>(8);
     private final SocketProvider supplier = mock(SocketProvider.class);
-    private final SocketClient client = new SocketClient(supplier);
+    private final SocketClient client = spy(new SocketClient(supplier));
 
     @BeforeEach
     void setUp() {
         client.subscribe(received::offer);
+        // bypass probe-before-connect; these tests use mocked sockets and don't bind
+        // a real listener, so a real TCP probe has nothing to connect to
+        doReturn(true).when(client).probeReachable(any(Duration.class));
     }
 
     @AfterEach
