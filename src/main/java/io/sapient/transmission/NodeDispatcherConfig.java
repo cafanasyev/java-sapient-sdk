@@ -20,6 +20,10 @@ import lombok.NonNull;
  *     retention window to account for status reports that were "published" into a dead TCP buffer
  *     before the watchdog noticed.
  * @param destinationId the fusion node recipient for all outbound messages
+ * @param registrationJitterWindow uniform-random delay window applied before each registration
+ *     message to spread the registration storm that occurs when many clients reconnect together
+ *     (CHANGELOG §5). Tests should set this to {@link Duration#ZERO} to make the registration
+ *     publish deterministic.
  */
 public record NodeDispatcherConfig(
         @NonNull Duration onlineCheckInterval,
@@ -27,7 +31,8 @@ public record NodeDispatcherConfig(
         @NonNull Duration registrationAckTimeout,
         @NonNull Duration reconnectGracePeriod,
         @NonNull Duration connectionLossDetectionDelay,
-        @NonNull UUID destinationId) {
+        @NonNull UUID destinationId,
+        @NonNull Duration registrationJitterWindow) {
 
     private static final Duration DEFAULT_ONLINE_CHECK_INTERVAL = Duration.ofSeconds(5);
     private static final Duration DEFAULT_PUBLISH_TIMEOUT = Duration.ofSeconds(5);
@@ -48,17 +53,7 @@ public record NodeDispatcherConfig(
                 DEFAULT_REGISTRATION_ACK_TIMEOUT,
                 DEFAULT_RECONNECT_GRACE_PERIOD,
                 Duration.ZERO,
-                destinationId);
-    }
-
-    public NodeDispatcherConfig withConnectionLossDetectionDelay(
-            @NonNull Duration connectionLossDetectionDelay) {
-        return new NodeDispatcherConfig(
-                onlineCheckInterval,
-                publishTimeout,
-                registrationAckTimeout,
-                reconnectGracePeriod,
-                connectionLossDetectionDelay,
-                destinationId);
+                destinationId,
+                Jitter.REGISTRATION_JITTER_WINDOW);
     }
 }

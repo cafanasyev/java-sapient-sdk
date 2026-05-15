@@ -134,7 +134,8 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofMinutes(2),
                                         Duration.ZERO,
-                                        FUSION_NODE_ID)));
+                                        FUSION_NODE_ID,
+                                        Duration.ZERO)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
         return new Setup(dispatcher, client, node, online, onMessage, nodeId);
     }
@@ -247,7 +248,8 @@ class NodeDispatcherTest {
                                         Duration.ofMillis(200),
                                         Duration.ofMinutes(2),
                                         Duration.ZERO,
-                                        FUSION_NODE_ID)));
+                                        FUSION_NODE_ID,
+                                        Duration.ZERO)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
 
         dispatcher.register(node);
@@ -786,7 +788,8 @@ class NodeDispatcherTest {
                                         Duration.ofMillis(100),
                                         Duration.ofMinutes(2),
                                         Duration.ZERO,
-                                        FUSION_NODE_ID)));
+                                        FUSION_NODE_ID,
+                                        Duration.ZERO)));
         try (dispatcher) {
             dispatcher.register(node);
 
@@ -994,7 +997,8 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofMinutes(2),
                                         Duration.ZERO,
-                                        FUSION_NODE_ID)));
+                                        FUSION_NODE_ID,
+                                        Duration.ZERO)));
         try (dispatcher) {
             dispatcher.register(node1);
             dispatcher.register(node2);
@@ -1062,7 +1066,8 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofMinutes(2),
                                         Duration.ZERO,
-                                        FUSION_NODE_ID)));
+                                        FUSION_NODE_ID,
+                                        Duration.ZERO)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
 
         dispatcher.register(node1);
@@ -1112,7 +1117,8 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofMillis(100),
                                         Duration.ZERO,
-                                        FUSION_NODE_ID)));
+                                        FUSION_NODE_ID,
+                                        Duration.ZERO)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
 
         dispatcher.register(node);
@@ -1162,7 +1168,8 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofMillis(100),
                                         Duration.ZERO,
-                                        FUSION_NODE_ID)));
+                                        FUSION_NODE_ID,
+                                        Duration.ZERO)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
         BiConsumer<ConnectionState, Instant> stateListener = captureStateListener(client);
 
@@ -1208,7 +1215,8 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofMillis(100),
                                         Duration.ZERO,
-                                        FUSION_NODE_ID)));
+                                        FUSION_NODE_ID,
+                                        Duration.ZERO)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
         BiConsumer<ConnectionState, Instant> stateListener = captureStateListener(client);
 
@@ -1270,7 +1278,8 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofMillis(100),
                                         Duration.ZERO,
-                                        FUSION_NODE_ID)));
+                                        FUSION_NODE_ID,
+                                        Duration.ZERO)));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
         BiConsumer<ConnectionState, Instant> stateListener = captureStateListener(client);
 
@@ -1329,7 +1338,8 @@ class NodeDispatcherTest {
                                         Duration.ofSeconds(5),
                                         Duration.ofMillis(100),
                                         Duration.ofMillis(150),
-                                        FUSION_NODE_ID));
+                                        FUSION_NODE_ID,
+                                        Duration.ZERO));
                 ServerSocket server2 = new ServerSocket(0)) {
             dispatcher.register(node);
             assertNotNull(registrations.poll(3, TimeUnit.SECONDS), "initial registration");
@@ -1405,6 +1415,130 @@ class NodeDispatcherTest {
 
             verify(s.client, timeout(2000).times(2)).start();
         }
+    }
+
+    @Test
+    @Timeout(10)
+    void firstStatusReportsSpreadAcrossNodesWithSameInterval() throws Exception {
+        // Five nodes on the same 500ms statusInterval, registered simultaneously, must NOT
+        // fire their first status reports in lockstep. Without jitter the spread is microseconds
+        // (mock publish returns instantly). With jitter (one-time phase offset in [0, interval))
+        // the first sends are spread over a 500ms window and the range across 5 nodes is
+        // overwhelmingly likely to exceed 50ms.
+        int nodeCount = 5;
+        long intervalMs = 500;
+        UUID[] ids = new UUID[nodeCount];
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                spy(
+                        new NodeDispatcher(
+                                client,
+                                new NodeDispatcherConfig(
+                                        Duration.ofMillis(10),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofSeconds(5),
+                                        Duration.ofMinutes(2),
+                                        Duration.ZERO,
+                                        FUSION_NODE_ID,
+                                        Duration.ZERO)));
+        Consumer<SapientMessage> onMessage = captureSubscription(client);
+
+        java.util.Map<UUID, Instant> firstStatusAt = new java.util.concurrent.ConcurrentHashMap<>();
+        doAnswer(
+                        inv -> {
+                            UUID id = inv.getArgument(1);
+                            firstStatusAt.putIfAbsent(id, Instant.now());
+                            return inv.callRealMethod();
+                        })
+                .when(dispatcher)
+                .publish(any(StatusReport.class), any(UUID.class), any(Duration.class));
+
+        for (int i = 0; i < nodeCount; i++) {
+            ids[i] = UUID.randomUUID();
+            INode node = mockNode(ids[i], new AtomicBoolean(true), intervalMs);
+            dispatcher.register(node);
+        }
+
+        for (int i = 0; i < nodeCount; i++) {
+            verify(dispatcher, timeout(2000))
+                    .publish(any(Registration.class), eq(ids[i]), any(Duration.class));
+            sendAck(onMessage, ids[i], true);
+        }
+
+        long deadline = System.currentTimeMillis() + 3000;
+        while (firstStatusAt.size() < nodeCount && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(
+                nodeCount, firstStatusAt.size(), "expected first status report from every node");
+
+        long minMs =
+                firstStatusAt.values().stream().mapToLong(Instant::toEpochMilli).min().getAsLong();
+        long maxMs =
+                firstStatusAt.values().stream().mapToLong(Instant::toEpochMilli).max().getAsLong();
+        long spreadMs = maxMs - minMs;
+        assertTrue(
+                spreadMs > 50,
+                "expected first-status-report spread > 50ms across "
+                        + nodeCount
+                        + " nodes, got "
+                        + spreadMs
+                        + "ms");
+
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(10)
+    void registrationsSpreadAcrossNodes() throws Exception {
+        // Five nodes registered simultaneously must NOT send their registration messages in
+        // lockstep. With registration jitter (one-time uniform delay in [0, 2s)) the
+        // registrations are spread across a ~2s window. Without jitter all 5 fire within
+        // milliseconds of each other.
+        int nodeCount = 5;
+        UUID[] ids = new UUID[nodeCount];
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                spy(new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID)));
+        captureSubscription(client);
+
+        java.util.Map<UUID, Instant> registrationAt =
+                new java.util.concurrent.ConcurrentHashMap<>();
+        doAnswer(
+                        inv -> {
+                            UUID id = inv.getArgument(1);
+                            registrationAt.putIfAbsent(id, Instant.now());
+                            return inv.callRealMethod();
+                        })
+                .when(dispatcher)
+                .publish(any(Registration.class), any(UUID.class), any(Duration.class));
+
+        for (int i = 0; i < nodeCount; i++) {
+            ids[i] = UUID.randomUUID();
+            INode node = mockNode(ids[i], new AtomicBoolean(true), 200);
+            dispatcher.register(node);
+        }
+
+        long deadline = System.currentTimeMillis() + 5000;
+        while (registrationAt.size() < nodeCount && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(nodeCount, registrationAt.size(), "expected registration from every node");
+
+        long minMs =
+                registrationAt.values().stream().mapToLong(Instant::toEpochMilli).min().getAsLong();
+        long maxMs =
+                registrationAt.values().stream().mapToLong(Instant::toEpochMilli).max().getAsLong();
+        long spreadMs = maxMs - minMs;
+        assertTrue(
+                spreadMs > 200,
+                "expected registration spread > 200ms across "
+                        + nodeCount
+                        + " nodes, got "
+                        + spreadMs
+                        + "ms");
+
+        dispatcher.close();
     }
 
     private static void runTestServer(

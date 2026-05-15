@@ -6,8 +6,10 @@ import com.google.protobuf.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.Random;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -93,6 +95,12 @@ class NodeWrapper implements AutoCloseable {
      */
     private Optional<Registration> register() throws InterruptedException, TimeoutException {
         Registration registration = node.getRegistration();
+
+        // jitter the registration send so coordinated reconnects don't trigger a registration
+        // storm at the server (CHANGELOG §5 layer 3)
+        Thread.sleep(
+                Jitter.phaseOffset(config.registrationJitterWindow(), ThreadLocalRandom.current()));
+
         publish(registration);
 
         RegistrationAck ack =
@@ -125,7 +133,11 @@ class NodeWrapper implements AutoCloseable {
                                 .multipliedBy(3)
                                 .plus(grace)
                                 .minus(config.connectionLossDetectionDelay()));
+        Random rng = ThreadLocalRandom.current();
         Instant lastSuccessfulStatusReportAt = Instant.now();
+
+        // one-time phase offset so nodes with the same statusInterval don't fire in lockstep
+        Thread.sleep(Jitter.phaseOffset(statusInterval, rng));
 
         while (node.isOnline() && !Thread.currentThread().isInterrupted()) {
             if (dispatcher.reregistrationEpoch() != registrationEpoch) {
@@ -147,7 +159,7 @@ class NodeWrapper implements AutoCloseable {
             } catch (TimeoutException e) {
                 log.error("status report publish timeout for node: {}", node.getNodeId(), e);
             }
-            Thread.sleep(statusInterval);
+            Thread.sleep(Jitter.jitteredSleep(statusInterval, rng));
         }
     }
 
