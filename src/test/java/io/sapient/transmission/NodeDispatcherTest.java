@@ -913,6 +913,61 @@ class NodeDispatcherTest {
     }
 
     @Test
+    @Timeout(8)
+    void taskDrivenReregistrationAckDeliveredToNode() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            // wait for register() to complete and the status loop to begin — confirmed by the
+            // first StatusReport publish (which goes through the spy because NodeWrapper holds
+            // a reference to the spy, unlike handleTask which runs on the original instance).
+            verify(s.node, timeout(1000)).getRegistration();
+            sendAck(s.onMessage, s.nodeId, true);
+            verify(s.dispatcher, timeout(3000).atLeastOnce())
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+
+            // first task-driven re-registration: ack must reach the node
+            sendRegistrationTask(s.onMessage, s.nodeId);
+            verify(s.node, timeout(1000).atLeast(2)).getRegistration();
+            sendAck(s.onMessage, s.nodeId, true);
+            verify(s.node, timeout(1000).times(2)).onRegistrationAck(any());
+
+            // second task-driven re-registration: with the bug, the ack queue is full from the
+            // first re-registration's ack and the dispatcher drops this one
+            sendRegistrationTask(s.onMessage, s.nodeId);
+            verify(s.node, timeout(1000).atLeast(3)).getRegistration();
+            sendAck(s.onMessage, s.nodeId, true);
+            verify(s.node, timeout(1000).times(3)).onRegistrationAck(any());
+        }
+    }
+
+    @Test
+    @Timeout(10)
+    void rejectedTaskDrivenReregistrationReentersRegister() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            verify(s.node, timeout(1000)).getRegistration();
+            sendAck(s.onMessage, s.nodeId, true);
+            // wait until register() finishes and the status loop begins
+            verify(s.dispatcher, timeout(3000).atLeastOnce())
+                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
+
+            // task-driven re-registration rejected by the fusion node
+            sendRegistrationTask(s.onMessage, s.nodeId);
+            verify(s.node, timeout(1000).atLeast(2)).getRegistration();
+            sendAck(s.onMessage, s.nodeId, false);
+            verify(s.node, timeout(1000).times(2)).onRegistrationAck(any());
+
+            // status loop must exit and the wrapper must re-enter register(),
+            // producing a third getRegistration() call
+            verify(s.node, timeout(4000).atLeast(3)).getRegistration();
+        }
+    }
+
+    @Test
     @Timeout(3)
     void registrationTaskSendsRejectedAckWhenOffline() throws Exception {
         UUID nodeId = UUID.randomUUID();

@@ -94,6 +94,13 @@ class NodeWrapper implements AutoCloseable {
      * @return the accepted {@link Registration}, or empty if rejected
      */
     private Optional<Registration> register() throws InterruptedException, TimeoutException {
+        // signal to NodeDispatcher that we are awaiting an ack here so it routes the next
+        // RegistrationAck to the queue (which wakes the poll below) in addition to delivering it
+        // to INode.onRegistrationAck. Drain any stale ack left over from a previous cycle so it
+        // can't be matched to the registration we are about to publish. See CHANGELOG.md §6.
+        registered.set(false);
+        ackQueue.clear();
+
         Registration registration = node.getRegistration();
 
         // jitter the registration send so coordinated reconnects don't trigger a registration
@@ -112,7 +119,6 @@ class NodeWrapper implements AutoCloseable {
                     config.registrationAckTimeout());
             throw new TimeoutException("registration ack timeout for node: " + node.getNodeId());
         }
-        node.onRegistrationAck(ack);
         if (!ack.getAcceptance()) return Optional.empty();
         registered.set(true);
         registrationEpoch = dispatcher.reregistrationEpoch();
@@ -139,7 +145,7 @@ class NodeWrapper implements AutoCloseable {
         // one-time phase offset so nodes with the same statusInterval don't fire in lockstep
         Thread.sleep(Jitter.phaseOffset(statusInterval, rng));
 
-        while (node.isOnline() && !Thread.currentThread().isInterrupted()) {
+        while (node.isOnline() && !Thread.currentThread().isInterrupted() && registered.get()) {
             if (dispatcher.reregistrationEpoch() != registrationEpoch) {
                 log.info(
                         "reconnected after grace period, re-registering node: {}",

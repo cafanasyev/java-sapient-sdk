@@ -282,3 +282,49 @@ forces all nodes back into sync gets re-spread on the next registration cycle �
   is a fresh independent sleep — long-term stability comes from having no long-term state.
 - Nodes with different `statusInterval` values are decorrelated for free; jitter mainly helps
   same-interval cohorts, which are the only ones that would synchronise in the first place.
+
+---
+
+## 6 — Deliver Registration Ack for fusion-node-triggered re-registration
+
+### Problem
+
+The fusion node can request a re-registration by sending the edge node a Task with
+`command.request = "registration"`. The dispatcher resends the Registration and the fusion node
+replies with a Registration Ack — but the ack never reaches `INode.onRegistrationAck`. The
+ack-delivery path only fires inside `NodeWrapper.register()`, which is not active during the
+status-report phase.
+
+Symptoms:
+
+- After the first Task-driven re-registration, `onRegistrationAck` is not invoked. The ack
+  silently fills `NodeWrapper.ackQueue` (capacity 1).
+- The next Task-driven re-registration finds the queue full; the dispatcher logs `ack queue
+  full, dropping ack for node` and the ack is lost.
+- A rejected re-registration is ignored — the node keeps sending status reports to a server
+  that no longer accepts it.
+
+### Decision
+
+- **Make `NodeDispatcher` the single delivery point for `onRegistrationAck`.** Every incoming
+  Registration Ack is dispatched to `node.onRegistrationAck(ack)` directly from
+  `NodeDispatcher._onMessage`, regardless of whether the wrapper is in the registration or
+  status-report phase. `NodeWrapper.register()` no longer invokes the callback itself.
+
+- **Use `ackQueue` only as a wake-up signal for `register()`.** Offer to the queue only when
+  `NodeWrapper.registered == false` (i.e. `register()` is waiting). When the wrapper is in the
+  status-report phase, skip the queue entirely — nothing is polling it.
+
+- **Exit the status loop on rejection.** When a Task-driven re-registration is rejected
+  (`acceptance == false`), clear `registered` so the status loop returns and the wrapper
+  re-enters `register()` for a fresh registration cycle.
+
+- **Drain `ackQueue` at the top of `register()`.** Prevents a stale ack from a previous cycle
+  being matched to a freshly published registration.
+
+### Result
+
+Every Registration Ack reaches `onRegistrationAck` exactly once, whether it follows the normal
+registration flow or a Task-driven re-registration, and regardless of how many times it
+happens during a single registration lifetime. A rejected re-registration sends the node back
+to the registration phase instead of silently continuing to publish status reports.
