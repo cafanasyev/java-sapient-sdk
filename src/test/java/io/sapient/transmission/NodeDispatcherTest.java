@@ -1184,6 +1184,18 @@ class NodeDispatcherTest {
                                         Duration.ZERO,
                                         FUSION_NODE_ID,
                                         Duration.ZERO)));
+        // Install the throwing stub before the node lifecycle thread starts, so it cannot race
+        // with the spy's status loop invoking publish() concurrently (Mockito UnfinishedStubbing).
+        AtomicBoolean connectionLost = new AtomicBoolean(false);
+        doAnswer(
+                        inv -> {
+                            if (connectionLost.get()) {
+                                throw new TimeoutException("simulated connection loss");
+                            }
+                            return inv.callRealMethod();
+                        })
+                .when(dispatcher)
+                .publish(any(StatusReport.class), eq(nodeId), any(Duration.class));
         Consumer<SapientMessage> onMessage = captureSubscription(client);
 
         dispatcher.register(node);
@@ -1196,9 +1208,7 @@ class NodeDispatcherTest {
                 .publish(any(StatusReport.class), eq(nodeId), any(Duration.class));
 
         // simulate connection loss — all status report publishes now time out
-        doThrow(new TimeoutException("simulated connection loss"))
-                .when(dispatcher)
-                .publish(any(StatusReport.class), eq(nodeId), any(Duration.class));
+        connectionLost.set(true);
 
         // after serverRetention (250ms) a second registration must be sent
         verify(dispatcher, timeout(2000).atLeast(2))
