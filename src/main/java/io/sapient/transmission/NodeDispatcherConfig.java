@@ -41,18 +41,23 @@ public record NodeDispatcherConfig(
 
     /**
      * Returns a configuration with default values (5s polling, 5s publish timeout, 5s registration
-     * ack timeout, 2 min reconnect grace period).
+     * ack timeout, 2 min reconnect grace period). {@code connectionLossDetectionDelay} has no
+     * intrinsic default — callers must supply the value derived from the transport's watchdog and
+     * probe settings.
      *
      * @param destinationId the fusion node recipient for all outbound messages
+     * @param connectionLossDetectionDelay worst-case time between actual network loss and the
+     *     client detecting it (see record-level docs)
      * @return configuration with default intervals
      */
-    public static NodeDispatcherConfig defaults(@NonNull UUID destinationId) {
+    public static NodeDispatcherConfig defaults(
+            @NonNull UUID destinationId, @NonNull Duration connectionLossDetectionDelay) {
         return new NodeDispatcherConfig(
                 DEFAULT_ONLINE_CHECK_INTERVAL,
                 DEFAULT_PUBLISH_TIMEOUT,
                 DEFAULT_REGISTRATION_ACK_TIMEOUT,
                 DEFAULT_RECONNECT_GRACE_PERIOD,
-                Duration.ZERO,
+                connectionLossDetectionDelay,
                 destinationId,
                 Jitter.REGISTRATION_JITTER_WINDOW);
     }

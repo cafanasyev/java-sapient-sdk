@@ -570,7 +570,8 @@ class NodeDispatcherTest {
         UUID fusionNodeId = UUID.randomUUID();
         IClient client = mock(IClient.class);
         try (var dispatcher =
-                new NodeDispatcher(client, NodeDispatcherConfig.defaults(fusionNodeId))) {
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(fusionNodeId, Duration.ZERO))) {
             Consumer<SapientMessage> onMessage = captureSubscription(client);
 
             onMessage.accept(
@@ -595,7 +596,8 @@ class NodeDispatcherTest {
     void publishRegistrationSerializesToClient() throws Exception {
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
-                new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID));
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
         UUID nodeId = UUID.randomUUID();
 
         Instant before = Instant.now();
@@ -613,7 +615,8 @@ class NodeDispatcherTest {
     void publishStatusReportSerializesToClient() throws Exception {
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
-                new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID));
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
         UUID nodeId = UUID.randomUUID();
 
         Instant before = Instant.now();
@@ -631,7 +634,8 @@ class NodeDispatcherTest {
     void publishAlertSerializesToClient() throws Exception {
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
-                new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID));
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
         UUID nodeId = UUID.randomUUID();
 
         Instant before = Instant.now();
@@ -649,7 +653,8 @@ class NodeDispatcherTest {
     void publishDetectionReportSerializesToClient() throws Exception {
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
-                new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID));
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
         UUID nodeId = UUID.randomUUID();
 
         Instant before = Instant.now();
@@ -667,7 +672,8 @@ class NodeDispatcherTest {
     void publishDoesNotForceInfoOnGoodbyeStatusReport() throws Exception {
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
-                new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID));
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
         UUID nodeId = UUID.randomUUID();
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
@@ -687,7 +693,7 @@ class NodeDispatcherTest {
         UUID fusionId = UUID.randomUUID();
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
-                new NodeDispatcher(client, NodeDispatcherConfig.defaults(fusionId));
+                new NodeDispatcher(client, NodeDispatcherConfig.defaults(fusionId, Duration.ZERO));
         UUID nodeId = UUID.randomUUID();
 
         dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
@@ -702,7 +708,8 @@ class NodeDispatcherTest {
     void statusReportInfoNewOnFirstPublish() throws Exception {
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
-                new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID));
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
         UUID nodeId = UUID.randomUUID();
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
@@ -721,7 +728,8 @@ class NodeDispatcherTest {
     void statusReportInfoUnchangedOnIdenticalPublish() throws Exception {
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
-                new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID));
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
         UUID nodeId = UUID.randomUUID();
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
@@ -745,7 +753,8 @@ class NodeDispatcherTest {
     void statusReportInfoNewOnChangedPublish() throws Exception {
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
-                new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID));
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
         UUID nodeId = UUID.randomUUID();
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
@@ -974,7 +983,8 @@ class NodeDispatcherTest {
         IClient client = mock(IClient.class);
         INode node = mockNode(nodeId, new AtomicBoolean(false), 200);
         NodeDispatcher dispatcher =
-                new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID));
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
         dispatcher.register(node);
 
         Consumer<SapientMessage> onMessage = captureSubscription(client);
@@ -1554,7 +1564,10 @@ class NodeDispatcherTest {
         UUID[] ids = new UUID[nodeCount];
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
-                spy(new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID)));
+                spy(
+                        new NodeDispatcher(
+                                client,
+                                NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO)));
         captureSubscription(client);
 
         java.util.Map<UUID, Instant> registrationAt =
