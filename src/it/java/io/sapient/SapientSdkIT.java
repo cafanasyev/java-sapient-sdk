@@ -7,6 +7,7 @@ import io.sapient.transport.SocketProvider;
 import io.sapient.transport.TestServer;
 import java.io.IOException;
 import java.net.Socket;
+import java.time.Duration;
 import java.util.UUID;
 import lombok.SneakyThrows;
 import org.junit.jupiter.api.AfterAll;
@@ -43,7 +44,10 @@ class SapientSdkIT {
                                 return server.getLocalPort();
                             }
                         });
-        dispatcher = new NodeDispatcher(client, NodeDispatcherConfig.defaults(UUID.randomUUID()));
+        dispatcher =
+                new NodeDispatcher(
+                        client,
+                        NodeDispatcherConfig.defaults(UUID.randomUUID(), Duration.ofSeconds(12)));
     }
 
     @AfterAll

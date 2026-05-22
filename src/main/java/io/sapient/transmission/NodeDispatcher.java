@@ -21,6 +21,7 @@ import lombok.extern.slf4j.Slf4j;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Alert;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.DetectionReport;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.RegistrationAck;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Task;
@@ -131,8 +132,19 @@ public class NodeDispatcher implements INodeDispatcher {
                     log.error("no node registered for destination: {}", destinationId);
                     return;
                 }
-                if (!node.getAckQueue().offer(message.getRegistrationAck())) {
-                    log.error("ack queue full, dropping ack for node: {}", destinationId);
+                RegistrationAck ack = message.getRegistrationAck();
+                // always deliver to the node — the registration may have been triggered by a
+                // Task from the fusion node while the wrapper was in the status-report phase,
+                // not by NodeWrapper.register(). See CHANGELOG.md §6.
+                node.getNode().onRegistrationAck(ack);
+                if (node.getRegistered().get()) {
+                    // wrapper is in status-report phase; nothing is polling the queue.
+                    // a rejected re-registration must drop the wrapper back into register().
+                    if (!ack.getAcceptance()) {
+                        node.getRegistered().set(false);
+                    }
+                } else if (!node.getAckQueue().offer(ack)) {
+                    log.error("ack queue full, dropping ack signal for node: {}", destinationId);
                 }
             }
             case ALERT_ACK -> {

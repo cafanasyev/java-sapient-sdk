@@ -6,8 +6,10 @@ import com.google.protobuf.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.Random;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -92,7 +94,20 @@ class NodeWrapper implements AutoCloseable {
      * @return the accepted {@link Registration}, or empty if rejected
      */
     private Optional<Registration> register() throws InterruptedException, TimeoutException {
+        // signal to NodeDispatcher that we are awaiting an ack here so it routes the next
+        // RegistrationAck to the queue (which wakes the poll below) in addition to delivering it
+        // to INode.onRegistrationAck. Drain any stale ack left over from a previous cycle so it
+        // can't be matched to the registration we are about to publish. See CHANGELOG.md §6.
+        registered.set(false);
+        ackQueue.clear();
+
         Registration registration = node.getRegistration();
+
+        // jitter the registration send so coordinated reconnects don't trigger a registration
+        // storm at the server (CHANGELOG §5 layer 3)
+        Thread.sleep(
+                Jitter.phaseOffset(config.registrationJitterWindow(), ThreadLocalRandom.current()));
+
         publish(registration);
 
         RegistrationAck ack =
@@ -104,7 +119,6 @@ class NodeWrapper implements AutoCloseable {
                     config.registrationAckTimeout());
             throw new TimeoutException("registration ack timeout for node: " + node.getNodeId());
         }
-        node.onRegistrationAck(ack);
         if (!ack.getAcceptance()) return Optional.empty();
         registered.set(true);
         registrationEpoch = dispatcher.reregistrationEpoch();
@@ -125,9 +139,13 @@ class NodeWrapper implements AutoCloseable {
                                 .multipliedBy(3)
                                 .plus(grace)
                                 .minus(config.connectionLossDetectionDelay()));
+        Random rng = ThreadLocalRandom.current();
         Instant lastSuccessfulStatusReportAt = Instant.now();
 
-        while (node.isOnline() && !Thread.currentThread().isInterrupted()) {
+        // one-time phase offset so nodes with the same statusInterval don't fire in lockstep
+        Thread.sleep(Jitter.phaseOffset(statusInterval, rng));
+
+        while (node.isOnline() && !Thread.currentThread().isInterrupted() && registered.get()) {
             if (dispatcher.reregistrationEpoch() != registrationEpoch) {
                 log.info(
                         "reconnected after grace period, re-registering node: {}",
@@ -147,7 +165,7 @@ class NodeWrapper implements AutoCloseable {
             } catch (TimeoutException e) {
                 log.error("status report publish timeout for node: {}", node.getNodeId(), e);
             }
-            Thread.sleep(statusInterval);
+            Thread.sleep(Jitter.jitteredSleep(statusInterval, rng));
         }
     }
 

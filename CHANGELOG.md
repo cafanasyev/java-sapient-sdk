@@ -216,3 +216,115 @@ TCP connection on an otherwise-silent link is detected within `watchdogInterval 
 of the network failure — a bound set entirely by the client's own scheduling, not by kernel or
 SSL-layer behaviour. Both re-registration checks are calibrated against that worst-case
 detection delay rather than the instant the client happened to notice.
+
+---
+
+## 5 — Spread status reports and registrations across nodes (jitter)
+
+### Problem
+
+When several nodes are registered in one `NodeDispatcher`, each `NodeWrapper` runs its own
+status-report loop: send a status report, sleep `statusInterval`, repeat. The sleep is exact, so
+nodes that share the same `statusInterval` and were registered around the same time send their
+reports at almost the same instant. Every cycle, forever — they don't drift apart on their own.
+With many nodes this looks like a sharp burst of traffic to the server every interval. After a
+network outage they all wake up and start over together, which re-synchronises them even harder.
+
+The same problem hits **registration messages** in coordinated reconnect scenarios: when a
+fusion server restarts or a regional outage clears, every connected client's TCP reconnects
+within seconds of each other and every client immediately fires a registration message. A
+registration carries the full node configuration, so the server gets a sharp spike of heavy
+messages exactly when it just came back up.
+
+We want to spread these sends across time so the server sees a steady stream instead of bursts.
+The spread must stay well inside the SAPIENT protocol limits — the server closes the connection
+after 3 consecutive missed status reports (BSI Flex 335 v2.0 §4.9) — and must not collapse back
+into sync after days or weeks of running.
+
+### Decision
+
+Each node spreads its sends in three layers:
+
+1. **One-time phase offset for status reports.** When a node registers, it picks a random offset
+   between `0` and its `statusInterval` (e.g. anywhere from 0 to 10 seconds for a 10-second
+   interval) and waits for that offset before the first status report. Two nodes with the same
+   interval start at different points in the cycle.
+
+2. **Small per-cycle jitter on status reports.** Every later sleep is `statusInterval ± 10%` (a
+   fresh random value each cycle). For a 10-second interval, sleep is 9–11 seconds. This makes
+   sure two nodes that happened to draw similar offsets slowly drift apart instead of staying
+   glued.
+
+3. **Registration jitter.** Before sending each registration message (initial or
+   re-registration), the node sleeps a uniform random delay in `[0, 2 seconds)`. This spreads
+   the registration storm that occurs when many clients reconnect simultaneously after a server
+   restart or regional network recovery. The 2-second window is fixed (not a percentage of
+   `statusInterval`) because registration latency budget is independent of how often status
+   reports happen, and 2 seconds is small relative to `reconnectGracePeriod` (default 2 minutes)
+   so it never risks the server's grace timer expiring before re-registration completes.
+
+All three layers use independent random draws per node — no shared state, no coordination.
+
+The 10% per-cycle jitter is well inside the 3-missed-report safety budget enforced by §3 and
+§4. The mean sleep is still exactly `statusInterval`, so the long-term send rate the server
+sees per node is unchanged.
+
+After a reconnect or re-registration, every offset is re-randomised. Any outage that briefly
+forces all nodes back into sync gets re-spread on the next registration cycle — self-healing.
+
+### Result
+
+- Many nodes that share a `statusInterval` no longer fire status reports at the same instant.
+- Registration messages are spread over a 2-second window when many clients reconnect together
+  (e.g. after a server restart) — preventing a registration storm.
+- Mean send rate per node is unchanged.
+- No timer, schedule anchor, or counter that can drift, accumulate error, or wrap. Every cycle
+  is a fresh independent sleep — long-term stability comes from having no long-term state.
+- Nodes with different `statusInterval` values are decorrelated for free; jitter mainly helps
+  same-interval cohorts, which are the only ones that would synchronise in the first place.
+
+---
+
+## 6 — Deliver Registration Ack for fusion-node-triggered re-registration
+
+### Problem
+
+The fusion node can request a re-registration by sending the edge node a Task with
+`command.request = "registration"`. The dispatcher resends the Registration and the fusion node
+replies with a Registration Ack — but the ack never reaches `INode.onRegistrationAck`. The
+ack-delivery path only fires inside `NodeWrapper.register()`, which is not active during the
+status-report phase.
+
+Symptoms:
+
+- After the first Task-driven re-registration, `onRegistrationAck` is not invoked. The ack
+  silently fills `NodeWrapper.ackQueue` (capacity 1).
+- The next Task-driven re-registration finds the queue full; the dispatcher logs `ack queue
+  full, dropping ack for node` and the ack is lost.
+- A rejected re-registration is ignored — the node keeps sending status reports to a server
+  that no longer accepts it.
+
+### Decision
+
+- **Make `NodeDispatcher` the single delivery point for `onRegistrationAck`.** Every incoming
+  Registration Ack is dispatched to `node.onRegistrationAck(ack)` directly from
+  `NodeDispatcher._onMessage`, regardless of whether the wrapper is in the registration or
+  status-report phase. `NodeWrapper.register()` no longer invokes the callback itself.
+
+- **Use `ackQueue` only as a wake-up signal for `register()`.** Offer to the queue only when
+  `NodeWrapper.registered == false` (i.e. `register()` is waiting). When the wrapper is in the
+  status-report phase, skip the queue entirely — nothing is polling it.
+
+- **Exit the status loop on rejection.** When a Task-driven re-registration is rejected
+  (`acceptance == false`), clear `registered` so the status loop returns and the wrapper
+  re-enters `register()` for a fresh registration cycle.
+
+- **Drain `ackQueue` at the top of `register()`.** Prevents a stale ack from a previous cycle
+  being matched to a freshly published registration.
+
+### Result
+
+Every Registration Ack reaches `onRegistrationAck` exactly once, whether it follows the normal
+registration flow or a Task-driven re-registration, and regardless of how many times it
+happens during a single registration lifetime. A rejected re-registration sends the node back
+to the registration phase instead of silently continuing to publish status reports.
