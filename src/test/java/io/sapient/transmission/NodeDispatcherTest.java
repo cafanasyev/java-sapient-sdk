@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
+import com.github.f4b6a3.ulid.Ulid;
 import io.sapient.transport.ConnectionState;
 import io.sapient.transport.IClient;
 import io.sapient.transport.SocketClient;
@@ -664,6 +665,80 @@ class NodeDispatcherTest {
         assertEquals(SapientMessage.ContentCase.DETECTION_REPORT, msg.getContentCase());
         assertEquals(nodeId.toString(), msg.getNodeId());
         assertRecentTimestamp(msg, before);
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void publishStatusReportGeneratesReportIdWhenEmpty() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+
+        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        String reportId = msg.getStatusReport().getReportId();
+        assertTrue(Ulid.isValid(reportId), "report_id should be a valid ULID: " + reportId);
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void publishStatusReportKeepsExistingReportId() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+
+        String reportId = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        dispatcher.publish(
+                StatusReport.newBuilder().setReportId(reportId).build(),
+                nodeId,
+                Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(reportId, msg.getStatusReport().getReportId());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void publishDetectionReportGeneratesReportIdWhenEmpty() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+
+        dispatcher.publish(DetectionReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        String reportId = msg.getDetectionReport().getReportId();
+        assertTrue(Ulid.isValid(reportId), "report_id should be a valid ULID: " + reportId);
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void publishDetectionReportKeepsExistingReportId() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+
+        String reportId = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+        dispatcher.publish(
+                DetectionReport.newBuilder().setReportId(reportId).build(),
+                nodeId,
+                Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(reportId, msg.getDetectionReport().getReportId());
         dispatcher.close();
     }
 

@@ -352,3 +352,28 @@ the actual state was unchanged.
 
 Identical status reports are now correctly downgraded to `INFO_UNCHANGED` even though each one has a
 distinct `report_id`. A report whose content actually changed still goes out as `INFO_NEW`.
+
+## 8 — Auto-populate ReportId in StatusReport and DetectionReport when empty
+
+### Problem
+
+`report_id` is a mandatory ULID on both `StatusReport` and `DetectionReport` (BSI Flex 335 v2.0).
+The SDK published whatever the node handed it, so a node that left `report_id` empty produced
+messages that violate the protocol's mandatory-field requirement — and a server that rejects or
+de-duplicates on `report_id` would behave unpredictably. Requiring every caller to generate a ULID
+itself is easy to forget and duplicates the same boilerplate in every node implementation.
+
+### Decision
+
+- **Generate a ULID at publish time when `report_id` is empty.** `NodeDispatcher` checks the field
+  on each `StatusReport` and `DetectionReport`; if blank, it fills in a freshly generated ULID
+  before publishing. A `report_id` the node already set is left untouched.
+
+- **Use the `ulid-creator` library** (`com.github.f4b6a3`) to generate monotonic ULIDs rather than
+  hand-roll one. Monotonic generation keeps the ids time-ordered even within the same millisecond,
+  which is the property the protocol's ULID requirement is after.
+
+### Result
+
+Every published `StatusReport` and `DetectionReport` carries a valid, time-ordered `report_id`
+without the node having to supply one. Nodes that do set their own `report_id` keep full control.

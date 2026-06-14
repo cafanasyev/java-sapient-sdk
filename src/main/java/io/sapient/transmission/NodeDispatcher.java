@@ -1,5 +1,6 @@
 package io.sapient.transmission;
 
+import com.github.f4b6a3.ulid.UlidCreator;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.util.JsonFormat;
@@ -281,6 +282,9 @@ public class NodeDispatcher implements INodeDispatcher {
     @Override
     public SapientMessage publish(StatusReport status, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
+        if (status.getReportId().isBlank()) {
+            status = status.toBuilder().setReportId(newReportId()).build();
+        }
         NodeWrapper node = findNode(nodeId);
         if (node != null && status.getInfo() == StatusReport.Info.INFO_NEW) {
             StatusReport prev = node.getLastStatusReport().getAndSet(status);
@@ -320,7 +324,18 @@ public class NodeDispatcher implements INodeDispatcher {
     @Override
     public SapientMessage publish(DetectionReport detection, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
+        if (detection.getReportId().isBlank()) {
+            detection = detection.toBuilder().setReportId(newReportId()).build();
+        }
         return publish(SapientMessage.newBuilder().setDetectionReport(detection), nodeId, timeout);
+    }
+
+    /**
+     * Generates a monotonic ULID for the mandatory {@code report_id} field. Monotonic generation
+     * keeps ids time-ordered even when several are created within the same millisecond.
+     */
+    private static String newReportId() {
+        return UlidCreator.getMonotonicUlid().toString();
     }
 
     private SapientMessage publish(SapientMessage.Builder builder, UUID nodeId, Duration timeout)
