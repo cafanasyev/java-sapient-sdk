@@ -6,7 +6,7 @@
 
     <groupId>io.github.cafanasyev</groupId>
     <artifactId>java-sapient-sdk</artifactId>
-    <version>0.3.0-SNAPSHOT</version>
+    <version>0.3.0</version>
 
     <name>BSI Flex 335 v2.0 SAPIENT Java SDK</name>
     <description>Java SDK for BSI Flex 335 v2.0 SAPIENT</description>
@@ -14,18 +14,16 @@
 
     <licenses>
         <license>
-            <name></name>
-            <url></url>
+            <name>The Unlicense</name>
+            <url>https://unlicense.org/</url>
             <distribution>repo</distribution>
-            <comments>
-            </comments>
         </license>
     </licenses>
 
 
     <scm>
         <url>https://github.com/cafanasyev/java-sapient-sdk</url>
-        <connection>scm:git:https://github.com/cfanasyev/java-sapient-sdk.git</connection>
+        <connection>scm:git:https://github.com/cafanasyev/java-sapient-sdk.git</connection>
         <developerConnection>scm:git:ssh://git@github.com:cafanasyev/java-sapient-sdk.git</developerConnection>
         <tag>HEAD</tag>
     </scm>
