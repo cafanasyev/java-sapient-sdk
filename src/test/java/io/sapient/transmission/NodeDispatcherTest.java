@@ -714,7 +714,10 @@ class NodeDispatcherTest {
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
         dispatcher.publish(
-                StatusReport.newBuilder().setInfo(StatusReport.Info.INFO_NEW).build(),
+                StatusReport.newBuilder()
+                        .setReportId("01ARZ3NDEKTSV4RRFFQ69G5FA0")
+                        .setInfo(StatusReport.Info.INFO_NEW)
+                        .build(),
                 nodeId,
                 Duration.ofSeconds(1));
 
@@ -733,18 +736,27 @@ class NodeDispatcherTest {
         UUID nodeId = UUID.randomUUID();
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
-        StatusReport report =
+        // Same content, but each report carries a distinct ULID report_id (as real reports do).
+        // The report_id difference must not prevent the INFO_UNCHANGED downgrade.
+        StatusReport first =
                 StatusReport.newBuilder()
+                        .setReportId("01ARZ3NDEKTSV4RRFFQ69G5FA1")
                         .setMode("patrol")
                         .setInfo(StatusReport.Info.INFO_NEW)
                         .build();
-        dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
-        dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
+        StatusReport second =
+                StatusReport.newBuilder()
+                        .setReportId("01ARZ3NDEKTSV4RRFFQ69G5FA2")
+                        .setMode("patrol")
+                        .setInfo(StatusReport.Info.INFO_NEW)
+                        .build();
+        dispatcher.publish(first, nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(second, nodeId, Duration.ofSeconds(1));
 
         ArgumentCaptor<SapientMessage> captor = ArgumentCaptor.forClass(SapientMessage.class);
         verify(client, times(2)).publish(captor.capture(), any(Duration.class));
-        SapientMessage second = captor.getAllValues().get(1);
-        assertEquals(StatusReport.Info.INFO_UNCHANGED, second.getStatusReport().getInfo());
+        SapientMessage published = captor.getAllValues().get(1);
+        assertEquals(StatusReport.Info.INFO_UNCHANGED, published.getStatusReport().getInfo());
         dispatcher.close();
     }
 
@@ -760,6 +772,7 @@ class NodeDispatcherTest {
 
         dispatcher.publish(
                 StatusReport.newBuilder()
+                        .setReportId("01ARZ3NDEKTSV4RRFFQ69G5FA3")
                         .setMode("patrol")
                         .setInfo(StatusReport.Info.INFO_NEW)
                         .build(),
@@ -767,6 +780,7 @@ class NodeDispatcherTest {
                 Duration.ofSeconds(1));
         dispatcher.publish(
                 StatusReport.newBuilder()
+                        .setReportId("01ARZ3NDEKTSV4RRFFQ69G5FA4")
                         .setMode("alert")
                         .setInfo(StatusReport.Info.INFO_NEW)
                         .build(),

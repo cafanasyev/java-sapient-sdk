@@ -328,3 +328,27 @@ Every Registration Ack reaches `onRegistrationAck` exactly once, whether it foll
 registration flow or a Task-driven re-registration, and regardless of how many times it
 happens during a single registration lifetime. A rejected re-registration sends the node back
 to the registration phase instead of silently continuing to publish status reports.
+
+## 7 — StatusReport.ReportId is ignored during StatusReport.Info overriding in the StatusReport publish
+
+### Problem
+
+When a node publishes a `StatusReport` with `info = INFO_NEW`, `NodeDispatcher` compares it against
+the previously published report and, if nothing changed, downgrades it to `INFO_UNCHANGED` so the
+server knows the state is identical to the last report.
+
+The comparison cleared only the `info` field before comparing. But every `StatusReport` carries a
+`report_id` — a mandatory ULID that is unique per message. Two consecutive reports therefore never
+compared equal, so `INFO_UNCHANGED` was never applied: every report went out as `INFO_NEW` even when
+the actual state was unchanged.
+
+### Decision
+
+- **Ignore `report_id` as well as `info` when comparing report content.** Both fields change on
+  every report regardless of whether the underlying state changed, so neither should count toward
+  "is this report the same as the last one".
+
+### Result
+
+Identical status reports are now correctly downgraded to `INFO_UNCHANGED` even though each one has a
+distinct `report_id`. A report whose content actually changed still goes out as `INFO_NEW`.

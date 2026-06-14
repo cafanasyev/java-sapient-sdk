@@ -284,15 +284,25 @@ public class NodeDispatcher implements INodeDispatcher {
         NodeWrapper node = findNode(nodeId);
         if (node != null && status.getInfo() == StatusReport.Info.INFO_NEW) {
             StatusReport prev = node.getLastStatusReport().getAndSet(status);
-            if (prev != null && clearInfo(prev).equals(clearInfo(status))) {
+            if (prev != null && contentEquals(prev, status)) {
                 status = status.toBuilder().setInfo(StatusReport.Info.INFO_UNCHANGED).build();
             }
         }
         return publish(SapientMessage.newBuilder().setStatusReport(status), nodeId, timeout);
     }
 
-    private static StatusReport clearInfo(StatusReport status) {
-        return status.toBuilder().clearInfo().build();
+    /**
+     * Compares two status reports for equal content, ignoring fields that change on every report
+     * regardless of whether the underlying state changed. {@code report_id} is a mandatory ULID
+     * unique to each message, and {@code info} is the very field being decided; including either
+     * would make the comparison always unequal and defeat the INFO_UNCHANGED de-duplication.
+     */
+    private static boolean contentEquals(StatusReport a, StatusReport b) {
+        return clearVolatileFields(a).equals(clearVolatileFields(b));
+    }
+
+    private static StatusReport clearVolatileFields(StatusReport status) {
+        return status.toBuilder().clearInfo().clearReportId().build();
     }
 
     @Override
