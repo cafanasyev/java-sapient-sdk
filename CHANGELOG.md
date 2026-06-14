@@ -328,3 +328,104 @@ Every Registration Ack reaches `onRegistrationAck` exactly once, whether it foll
 registration flow or a Task-driven re-registration, and regardless of how many times it
 happens during a single registration lifetime. A rejected re-registration sends the node back
 to the registration phase instead of silently continuing to publish status reports.
+
+## 7 — StatusReport.ReportId is ignored during StatusReport.Info overriding in the StatusReport publish
+
+### Problem
+
+When a node publishes a `StatusReport` with `info = INFO_NEW`, `NodeDispatcher` compares it against
+the previously published report and, if nothing changed, downgrades it to `INFO_UNCHANGED` so the
+server knows the state is identical to the last report.
+
+The comparison cleared only the `info` field before comparing. But every `StatusReport` carries a
+`report_id` — a mandatory ULID that is unique per message. Two consecutive reports therefore never
+compared equal, so `INFO_UNCHANGED` was never applied: every report went out as `INFO_NEW` even when
+the actual state was unchanged.
+
+### Decision
+
+- **Ignore `report_id` as well as `info` when comparing report content.** Both fields change on
+  every report regardless of whether the underlying state changed, so neither should count toward
+  "is this report the same as the last one".
+
+### Result
+
+Identical status reports are now correctly downgraded to `INFO_UNCHANGED` even though each one has a
+distinct `report_id`. A report whose content actually changed still goes out as `INFO_NEW`.
+
+## 8 — Auto-populate ReportId in StatusReport and DetectionReport when empty
+
+### Problem
+
+`report_id` is a mandatory ULID on both `StatusReport` and `DetectionReport` (BSI Flex 335 v2.0).
+The SDK published whatever the node handed it, so a node that left `report_id` empty produced
+messages that violate the protocol's mandatory-field requirement — and a server that rejects or
+de-duplicates on `report_id` would behave unpredictably. Requiring every caller to generate a ULID
+itself is easy to forget and duplicates the same boilerplate in every node implementation.
+
+### Decision
+
+- **Generate a ULID at publish time when `report_id` is empty.** `NodeDispatcher` checks the field
+  on each `StatusReport` and `DetectionReport`; if blank, it fills in a freshly generated ULID
+  before publishing. A `report_id` the node already set is left untouched.
+
+- **Use the `ulid-creator` library** (`com.github.f4b6a3`) to generate monotonic ULIDs rather than
+  hand-roll one. Monotonic generation keeps the ids time-ordered even within the same millisecond,
+  which is the property the protocol's ULID requirement is after.
+
+### Result
+
+Every published `StatusReport` and `DetectionReport` carries a valid, time-ordered `report_id`
+without the node having to supply one. Nodes that do set their own `report_id` keep full control.
+
+## 9 — Log body of all incoming messages when in the DEBUG log level
+
+### Problem
+
+Outgoing messages were logged twice: a one-line INFO summary (`sending <type> …`) and, when DEBUG
+was enabled, the full message body as JSON. Incoming messages only got the INFO summary
+(`received <type> for node: …`) — there was no way to see the actual contents of what the fusion
+node sent, even at DEBUG. That made diagnosing acks, tasks, and malformed incoming messages much
+harder than diagnosing the outgoing side.
+
+### Decision
+
+- **Log the full JSON body of every incoming message at DEBUG**, mirroring the outgoing side. The
+  body log only renders when DEBUG is enabled, so INFO-level logging is unchanged.
+
+- **Share one helper between both directions.** The body-rendering block (guard on DEBUG, print the
+  message as JSON, fall back to a placeholder if serialization fails) was extracted from the
+  publish path into a single helper used by both incoming and outgoing logging, so the two stay in
+  sync.
+
+### Result
+
+At DEBUG level the full contents of both sent and received messages are visible. At INFO and above,
+logging is unchanged — only the one-line summaries appear.
+
+## 10 — Deliver received Error messages to the node
+
+### Problem
+
+`Error` is one of the SAPIENT message types a server can send (the `error` field in the
+`SapientMessage` oneof, BSI Flex 335 v2.0). It reports back the packet that caused a problem and one
+or more error descriptions. `INode` had callbacks for the other server-to-node messages
+(`onRegistrationAck`, `onAlertAck`, `onTask`), but none for `Error` — so when the dispatcher
+received an `Error`, it hit the `default` branch of the message switch and was silently dropped. A
+node had no way to learn that the server rejected one of its messages.
+
+### Decision
+
+- **Add `onError(Error error)` to `INode`**, mirroring the existing server-to-node callbacks.
+
+- **Route the `ERROR` content case in `NodeDispatcher`** to `node.onError(...)`, exactly like the
+  `ALERT_ACK` case: if no node is registered for the destination it is logged and dropped,
+  otherwise the `Error` is delivered to the node.
+
+### Result
+
+A node is now notified whenever the server sends it an `Error`, with the full `Error` message
+(offending packet and descriptions) available for it to inspect. The full body of every incoming
+`Error` is always logged at DEBUG by the shared incoming-message logging added in §9 — independent
+of message routing, so it is logged whether or not a node is registered for the destination. No
+Error-specific logging is needed.

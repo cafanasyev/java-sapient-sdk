@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
+import com.github.f4b6a3.ulid.Ulid;
 import io.sapient.transport.ConnectionState;
 import io.sapient.transport.IClient;
 import io.sapient.transport.SocketClient;
@@ -34,9 +35,11 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.Logger;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Alert;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.AlertAck;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.DetectionReport;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.Error;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.RegistrationAck;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
@@ -510,6 +513,25 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
+    void errorDeliveredToNode() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            Error error = Error.newBuilder().addErrorMessage("bad packet").build();
+            s.onMessage.accept(
+                    SapientMessage.newBuilder()
+                            .setDestinationId(s.nodeId.toString())
+                            .setError(error)
+                            .build());
+
+            verify(s.node, timeout(1000))
+                    .onError(argThat(e -> e.getErrorMessageList().contains("bad packet")));
+        }
+    }
+
+    @Test
+    @Timeout(3)
     void taskDeliveredToNode() throws Exception {
         try (var s = setup(200)) {
             s.online.set(true);
@@ -669,6 +691,98 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
+    void publishStatusReportGeneratesReportIdWhenEmpty() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+
+        dispatcher.publish(StatusReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        String reportId = msg.getStatusReport().getReportId();
+        assertTrue(Ulid.isValid(reportId), "report_id should be a valid ULID: " + reportId);
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void publishStatusReportKeepsExistingReportId() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+
+        String reportId = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        dispatcher.publish(
+                StatusReport.newBuilder().setReportId(reportId).build(),
+                nodeId,
+                Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(reportId, msg.getStatusReport().getReportId());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void publishDetectionReportGeneratesReportIdWhenEmpty() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+
+        dispatcher.publish(DetectionReport.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        String reportId = msg.getDetectionReport().getReportId();
+        assertTrue(Ulid.isValid(reportId), "report_id should be a valid ULID: " + reportId);
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void publishDetectionReportKeepsExistingReportId() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+
+        String reportId = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+        dispatcher.publish(
+                DetectionReport.newBuilder().setReportId(reportId).build(),
+                nodeId,
+                Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(reportId, msg.getDetectionReport().getReportId());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void logBodyRendersMessageAsJson() {
+        Logger log = mock(Logger.class);
+        SapientMessage message =
+                SapientMessage.newBuilder()
+                        .setStatusReport(StatusReport.newBuilder().setMode("patrol"))
+                        .build();
+
+        NodeDispatcher.logBody(log, message);
+
+        ArgumentCaptor<Object> arg = ArgumentCaptor.forClass(Object.class);
+        verify(log).debug(eq("message: {}"), arg.capture());
+        assertTrue(
+                ((String) arg.getValue()).contains("patrol"),
+                "rendered body should contain the message contents");
+    }
+
+    @Test
+    @Timeout(3)
     void publishDoesNotForceInfoOnGoodbyeStatusReport() throws Exception {
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
@@ -714,7 +828,10 @@ class NodeDispatcherTest {
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
         dispatcher.publish(
-                StatusReport.newBuilder().setInfo(StatusReport.Info.INFO_NEW).build(),
+                StatusReport.newBuilder()
+                        .setReportId("01ARZ3NDEKTSV4RRFFQ69G5FA0")
+                        .setInfo(StatusReport.Info.INFO_NEW)
+                        .build(),
                 nodeId,
                 Duration.ofSeconds(1));
 
@@ -733,18 +850,27 @@ class NodeDispatcherTest {
         UUID nodeId = UUID.randomUUID();
         dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
 
-        StatusReport report =
+        // Same content, but each report carries a distinct ULID report_id (as real reports do).
+        // The report_id difference must not prevent the INFO_UNCHANGED downgrade.
+        StatusReport first =
                 StatusReport.newBuilder()
+                        .setReportId("01ARZ3NDEKTSV4RRFFQ69G5FA1")
                         .setMode("patrol")
                         .setInfo(StatusReport.Info.INFO_NEW)
                         .build();
-        dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
-        dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
+        StatusReport second =
+                StatusReport.newBuilder()
+                        .setReportId("01ARZ3NDEKTSV4RRFFQ69G5FA2")
+                        .setMode("patrol")
+                        .setInfo(StatusReport.Info.INFO_NEW)
+                        .build();
+        dispatcher.publish(first, nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(second, nodeId, Duration.ofSeconds(1));
 
         ArgumentCaptor<SapientMessage> captor = ArgumentCaptor.forClass(SapientMessage.class);
         verify(client, times(2)).publish(captor.capture(), any(Duration.class));
-        SapientMessage second = captor.getAllValues().get(1);
-        assertEquals(StatusReport.Info.INFO_UNCHANGED, second.getStatusReport().getInfo());
+        SapientMessage published = captor.getAllValues().get(1);
+        assertEquals(StatusReport.Info.INFO_UNCHANGED, published.getStatusReport().getInfo());
         dispatcher.close();
     }
 
@@ -760,6 +886,7 @@ class NodeDispatcherTest {
 
         dispatcher.publish(
                 StatusReport.newBuilder()
+                        .setReportId("01ARZ3NDEKTSV4RRFFQ69G5FA3")
                         .setMode("patrol")
                         .setInfo(StatusReport.Info.INFO_NEW)
                         .build(),
@@ -767,6 +894,7 @@ class NodeDispatcherTest {
                 Duration.ofSeconds(1));
         dispatcher.publish(
                 StatusReport.newBuilder()
+                        .setReportId("01ARZ3NDEKTSV4RRFFQ69G5FA4")
                         .setMode("alert")
                         .setInfo(StatusReport.Info.INFO_NEW)
                         .build(),

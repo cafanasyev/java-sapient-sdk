@@ -1,5 +1,6 @@
 package io.sapient.transmission;
 
+import com.github.f4b6a3.ulid.UlidCreator;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.util.JsonFormat;
@@ -18,6 +19,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Alert;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.DetectionReport;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
@@ -125,6 +127,9 @@ public class NodeDispatcher implements INodeDispatcher {
     private void _onMessage(SapientMessage message) throws TimeoutException, InterruptedException {
         UUID destinationId = UUID.fromString(message.getDestinationId());
         log.info("received {} for node: {}", message.getContentCase(), destinationId);
+        if (log.isDebugEnabled()) {
+            logBody(log, message);
+        }
         NodeWrapper node = findNode(destinationId);
         switch (message.getContentCase()) {
             case REGISTRATION_ACK -> {
@@ -153,6 +158,13 @@ public class NodeDispatcher implements INodeDispatcher {
                     return;
                 }
                 node.getNode().onAlertAck(message.getAlertAck());
+            }
+            case ERROR -> {
+                if (node == null) {
+                    log.error("no node registered for destination: {}", destinationId);
+                    return;
+                }
+                node.getNode().onError(message.getError());
             }
             case TASK -> {
                 Task task = message.getTask();
@@ -281,18 +293,31 @@ public class NodeDispatcher implements INodeDispatcher {
     @Override
     public SapientMessage publish(StatusReport status, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
+        if (status.getReportId().isBlank()) {
+            status = status.toBuilder().setReportId(newReportId()).build();
+        }
         NodeWrapper node = findNode(nodeId);
         if (node != null && status.getInfo() == StatusReport.Info.INFO_NEW) {
             StatusReport prev = node.getLastStatusReport().getAndSet(status);
-            if (prev != null && clearInfo(prev).equals(clearInfo(status))) {
+            if (prev != null && contentEquals(prev, status)) {
                 status = status.toBuilder().setInfo(StatusReport.Info.INFO_UNCHANGED).build();
             }
         }
         return publish(SapientMessage.newBuilder().setStatusReport(status), nodeId, timeout);
     }
 
-    private static StatusReport clearInfo(StatusReport status) {
-        return status.toBuilder().clearInfo().build();
+    /**
+     * Compares two status reports for equal content, ignoring fields that change on every report
+     * regardless of whether the underlying state changed. {@code report_id} is a mandatory ULID
+     * unique to each message, and {@code info} is the very field being decided; including either
+     * would make the comparison always unequal and defeat the INFO_UNCHANGED de-duplication.
+     */
+    private static boolean contentEquals(StatusReport a, StatusReport b) {
+        return clearVolatileFields(a).equals(clearVolatileFields(b));
+    }
+
+    private static StatusReport clearVolatileFields(StatusReport status) {
+        return status.toBuilder().clearInfo().clearReportId().build();
     }
 
     @Override
@@ -310,7 +335,18 @@ public class NodeDispatcher implements INodeDispatcher {
     @Override
     public SapientMessage publish(DetectionReport detection, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
+        if (detection.getReportId().isBlank()) {
+            detection = detection.toBuilder().setReportId(newReportId()).build();
+        }
         return publish(SapientMessage.newBuilder().setDetectionReport(detection), nodeId, timeout);
+    }
+
+    /**
+     * Generates a monotonic ULID for the mandatory {@code report_id} field. Monotonic generation
+     * keeps ids time-ordered even when several are created within the same millisecond.
+     */
+    private static String newReportId() {
+        return UlidCreator.getMonotonicUlid().toString();
     }
 
     private SapientMessage publish(SapientMessage.Builder builder, UUID nodeId, Duration timeout)
@@ -325,14 +361,24 @@ public class NodeDispatcher implements INodeDispatcher {
                 nodeId,
                 config.destinationId());
         if (log.isDebugEnabled()) {
-            try {
-                log.debug("message: {}", JsonFormat.printer().print(message));
-            } catch (InvalidProtocolBufferException e) {
-                log.debug("message: <serialization failed>", e);
-            }
+            logBody(log, message);
         }
         client.publish(message, timeout);
         return message;
+    }
+
+    /**
+     * Renders the full JSON body of a message at DEBUG level. Shared by the outgoing publish path
+     * and the incoming {@code _onMessage} path so both directions render bodies identically.
+     * Callers guard the invocation with {@code log.isDebugEnabled()} so the JSON is never built at
+     * higher log levels.
+     */
+    static void logBody(Logger log, SapientMessage message) {
+        try {
+            log.debug("message: {}", JsonFormat.printer().print(message));
+        } catch (InvalidProtocolBufferException e) {
+            log.debug("message: <serialization failed>", e);
+        }
     }
 
     private static Timestamp timestampNow() {
