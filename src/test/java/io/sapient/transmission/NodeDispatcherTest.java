@@ -35,6 +35,7 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.Logger;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Alert;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.AlertAck;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.DetectionReport;
@@ -740,6 +741,24 @@ class NodeDispatcherTest {
         SapientMessage msg = capturePublished(client);
         assertEquals(reportId, msg.getDetectionReport().getReportId());
         dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void logBodyRendersMessageAsJson() {
+        Logger log = mock(Logger.class);
+        SapientMessage message =
+                SapientMessage.newBuilder()
+                        .setStatusReport(StatusReport.newBuilder().setMode("patrol"))
+                        .build();
+
+        NodeDispatcher.logBody(log, message);
+
+        ArgumentCaptor<Object> arg = ArgumentCaptor.forClass(Object.class);
+        verify(log).debug(eq("message: {}"), arg.capture());
+        assertTrue(
+                ((String) arg.getValue()).contains("patrol"),
+                "rendered body should contain the message contents");
     }
 
     @Test

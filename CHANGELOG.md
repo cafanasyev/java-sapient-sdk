@@ -377,3 +377,28 @@ itself is easy to forget and duplicates the same boilerplate in every node imple
 
 Every published `StatusReport` and `DetectionReport` carries a valid, time-ordered `report_id`
 without the node having to supply one. Nodes that do set their own `report_id` keep full control.
+
+## 9 — Log body of all incoming messages when in the DEBUG log level
+
+### Problem
+
+Outgoing messages were logged twice: a one-line INFO summary (`sending <type> …`) and, when DEBUG
+was enabled, the full message body as JSON. Incoming messages only got the INFO summary
+(`received <type> for node: …`) — there was no way to see the actual contents of what the fusion
+node sent, even at DEBUG. That made diagnosing acks, tasks, and malformed incoming messages much
+harder than diagnosing the outgoing side.
+
+### Decision
+
+- **Log the full JSON body of every incoming message at DEBUG**, mirroring the outgoing side. The
+  body log only renders when DEBUG is enabled, so INFO-level logging is unchanged.
+
+- **Share one helper between both directions.** The body-rendering block (guard on DEBUG, print the
+  message as JSON, fall back to a placeholder if serialization fails) was extracted from the
+  publish path into a single helper used by both incoming and outgoing logging, so the two stay in
+  sync.
+
+### Result
+
+At DEBUG level the full contents of both sent and received messages are visible. At INFO and above,
+logging is unchanged — only the one-line summaries appear.

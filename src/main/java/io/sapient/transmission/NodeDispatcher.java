@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Alert;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.DetectionReport;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
@@ -126,6 +127,9 @@ public class NodeDispatcher implements INodeDispatcher {
     private void _onMessage(SapientMessage message) throws TimeoutException, InterruptedException {
         UUID destinationId = UUID.fromString(message.getDestinationId());
         log.info("received {} for node: {}", message.getContentCase(), destinationId);
+        if (log.isDebugEnabled()) {
+            logBody(log, message);
+        }
         NodeWrapper node = findNode(destinationId);
         switch (message.getContentCase()) {
             case REGISTRATION_ACK -> {
@@ -350,14 +354,24 @@ public class NodeDispatcher implements INodeDispatcher {
                 nodeId,
                 config.destinationId());
         if (log.isDebugEnabled()) {
-            try {
-                log.debug("message: {}", JsonFormat.printer().print(message));
-            } catch (InvalidProtocolBufferException e) {
-                log.debug("message: <serialization failed>", e);
-            }
+            logBody(log, message);
         }
         client.publish(message, timeout);
         return message;
+    }
+
+    /**
+     * Renders the full JSON body of a message at DEBUG level. Shared by the outgoing publish path
+     * and the incoming {@code _onMessage} path so both directions render bodies identically.
+     * Callers guard the invocation with {@code log.isDebugEnabled()} so the JSON is never built at
+     * higher log levels.
+     */
+    static void logBody(Logger log, SapientMessage message) {
+        try {
+            log.debug("message: {}", JsonFormat.printer().print(message));
+        } catch (InvalidProtocolBufferException e) {
+            log.debug("message: <serialization failed>", e);
+        }
     }
 
     private static Timestamp timestampNow() {
