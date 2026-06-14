@@ -2,6 +2,7 @@ package io.sapient.transmission;
 
 import java.util.UUID;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.*;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.Error;
 
 /** Represents a SAPIENT edge or fusion node. */
 public interface INode {
@@ -54,4 +55,11 @@ public interface INode {
      * @param task the task assigned by the fusion node
      */
     void onTask(Task task);
+
+    /**
+     * Called when an {@link Error} is received for this node.
+     *
+     * @param error the error reported by the fusion node
+     */
+    void onError(Error error);
 }

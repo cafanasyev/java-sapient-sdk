@@ -39,6 +39,7 @@ import org.slf4j.Logger;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Alert;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.AlertAck;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.DetectionReport;
+import uk.gov.dstl.sapientmsg.bsiflex335v2.Error;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.RegistrationAck;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
@@ -507,6 +508,25 @@ class NodeDispatcherTest {
 
             verify(s.node, timeout(1000))
                     .onAlertAck(argThat(ack -> "alert-1".equals(ack.getAlertId())));
+        }
+    }
+
+    @Test
+    @Timeout(3)
+    void errorDeliveredToNode() throws Exception {
+        try (var s = setup(200)) {
+            s.online.set(true);
+            s.dispatcher.register(s.node);
+
+            Error error = Error.newBuilder().addErrorMessage("bad packet").build();
+            s.onMessage.accept(
+                    SapientMessage.newBuilder()
+                            .setDestinationId(s.nodeId.toString())
+                            .setError(error)
+                            .build());
+
+            verify(s.node, timeout(1000))
+                    .onError(argThat(e -> e.getErrorMessageList().contains("bad packet")));
         }
     }
 

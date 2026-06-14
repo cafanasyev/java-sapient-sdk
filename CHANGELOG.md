@@ -402,3 +402,30 @@ harder than diagnosing the outgoing side.
 
 At DEBUG level the full contents of both sent and received messages are visible. At INFO and above,
 logging is unchanged — only the one-line summaries appear.
+
+## 10 — Deliver received Error messages to the node
+
+### Problem
+
+`Error` is one of the SAPIENT message types a server can send (the `error` field in the
+`SapientMessage` oneof, BSI Flex 335 v2.0). It reports back the packet that caused a problem and one
+or more error descriptions. `INode` had callbacks for the other server-to-node messages
+(`onRegistrationAck`, `onAlertAck`, `onTask`), but none for `Error` — so when the dispatcher
+received an `Error`, it hit the `default` branch of the message switch and was silently dropped. A
+node had no way to learn that the server rejected one of its messages.
+
+### Decision
+
+- **Add `onError(Error error)` to `INode`**, mirroring the existing server-to-node callbacks.
+
+- **Route the `ERROR` content case in `NodeDispatcher`** to `node.onError(...)`, exactly like the
+  `ALERT_ACK` case: if no node is registered for the destination it is logged and dropped,
+  otherwise the `Error` is delivered to the node.
+
+### Result
+
+A node is now notified whenever the server sends it an `Error`, with the full `Error` message
+(offending packet and descriptions) available for it to inspect. The full body of every incoming
+`Error` is always logged at DEBUG by the shared incoming-message logging added in §9 — independent
+of message routing, so it is logged whether or not a node is registered for the destination. No
+Error-specific logging is needed.

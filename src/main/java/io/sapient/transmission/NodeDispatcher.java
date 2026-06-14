@@ -159,6 +159,13 @@ public class NodeDispatcher implements INodeDispatcher {
                 }
                 node.getNode().onAlertAck(message.getAlertAck());
             }
+            case ERROR -> {
+                if (node == null) {
+                    log.error("no node registered for destination: {}", destinationId);
+                    return;
+                }
+                node.getNode().onError(message.getError());
+            }
             case TASK -> {
                 Task task = message.getTask();
                 String reason = null;
