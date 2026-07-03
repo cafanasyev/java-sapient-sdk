@@ -9,6 +9,10 @@ public interface INode {
 
     /**
      * Returns {@code true} if the node is currently online.
+     * Used by Node Dispatcher to understand is node available
+     * and can be registered. And otherwise - to understand did
+     * non become unavailable and need to send GOOD BYE Status
+     * report to Fusion Node.
      *
      * @return online status
      */
