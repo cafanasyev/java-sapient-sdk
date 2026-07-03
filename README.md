@@ -32,8 +32,6 @@ Java SDK for [BSI Flex 335 v2.0](https://www.bsigroup.com/en-US/insights-and-med
 |---|-----------------------------------------------------------------------------------------------------|
 | `io.sapient.transport` | TCP transport layer — publish/subscribe over raw byte buffers, automatic reconnection, mTLS support |
 | `io.sapient.transmission` | Transmission module — node registration, status reporting, ack handling                             |
-| `io.sapient.fusion` | Fusion module — *not yet implemented*                                                               |
-
 ## Code Quality
 
 The project uses three static analysis tools that run automatically during the build:
@@ -88,7 +86,7 @@ Maven:
 Gradle:
 
 ```kotlin
-implementation("io.github.cafanasyev:java-sapient-sdk:0.3.0")
+implementation("io.github.cafanasyev:java-sapient-sdk:0.3.1")
 ```
 
 1. Implement the [INode.java](src/main/java/io/sapient/transmission/INode.java) interface for each Node you want to connect.
