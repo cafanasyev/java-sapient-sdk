@@ -38,7 +38,7 @@ class SocketClientTest {
         Socket get() throws IOException;
     }
 
-    private static class TestSocketProvider implements SocketProvider {
+    private static class TestSocketProvider implements ISocketProvider {
         private final String host;
         private final IntSupplier portSupplier;
         private final SocketSupplier socketSupplier;
@@ -66,7 +66,7 @@ class SocketClientTest {
     }
 
     private static SocketClient newClient(
-            SocketProvider provider, ArrayBlockingQueue<SapientMessage> received) {
+            ISocketProvider provider, ArrayBlockingQueue<SapientMessage> received) {
         SocketClient client = spy(new SocketClient(provider));
         // bypass probe-before-connect so TestServer's single accept() is consumed by
         // the real client rather than by the probe

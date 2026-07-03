@@ -9,7 +9,7 @@ import java.net.Socket;
  * <p>Carrying the host and port explicitly allows the client to perform reachability probes
  * independently of the managed connection.
  */
-public interface SocketProvider {
+public interface ISocketProvider {
 
     /**
      * Creates and returns a new socket connection to the endpoint.

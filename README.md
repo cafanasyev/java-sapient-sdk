@@ -71,7 +71,7 @@ The SDK is built around four interfaces. To familiarize yourself with the intern
 - [`INode`](src/main/java/io/sapient/transmission/INode.java) — a SAPIENT edge/fusion node you implement (identity, registration, and server-to-node callbacks).
 - [`INodeDispatcher`](src/main/java/io/sapient/transmission/INodeDispatcher.java) — manages node registration, the keep-alive/status-report lifecycle, and message routing.
 - [`IClient`](src/main/java/io/sapient/transport/IClient.java) — the transport: publish/subscribe typed SAPIENT messages plus connection-state monitoring.
-- [`SocketProvider`](src/main/java/io/sapient/transport/SocketProvider.java) — supplies the socket (host/port and TLS vs. plain) to the client.
+- [`ISocketProvider`](src/main/java/io/sapient/transport/ISocketProvider.java) — supplies the socket (host/port and TLS vs. plain) to the client.
 
 Add the SDK to your build.
 
@@ -81,20 +81,20 @@ Maven:
 <dependency>
     <groupId>io.github.cafanasyev</groupId>
     <artifactId>java-sapient-sdk</artifactId>
-    <version>0.3.0</version>
+    <version>0.3.1</version>
 </dependency>
 ```
 
 Gradle:
 
-```groovy
-implementation 'io.github.cafanasyev:java-sapient-sdk:0.3.0'
+```kotlin
+implementation("io.github.cafanasyev:java-sapient-sdk:0.3.0")
 ```
 
 1. Implement the [INode.java](src/main/java/io/sapient/transmission/INode.java) interface for each Node you want to connect.
    All methods are supplied with comments explaining their purpose.
 2. Create an instance of the [NodeDispatcher.java](src/main/java/io/sapient/transmission/NodeDispatcher.java). In order to do so:
-    * Implement the [SocketProvider.java](src/main/java/io/sapient/transport/SocketProvider.java) interface. For the default TLS based connection use the already implemented [SslContextFactory.java](src/main/java/io/sapient/transport/SslContextFactory.java). For a non-TLS connection you can use: [`SapientConfig.java:82`](https://github.com/cafanasyev/java-sapient-test-harness/blob/cd5dab8/src/main/java/io/sapient/SapientConfig.java#L82)
+    * Implement the [ISocketProvider.java](src/main/java/io/sapient/transport/ISocketProvider.java) interface. For the default TLS based connection use the already implemented [SslContextFactory.java](src/main/java/io/sapient/transport/SslContextFactory.java). For a non-TLS connection you can use: [`SapientConfig.java:82`](https://github.com/cafanasyev/java-sapient-test-harness/blob/cd5dab8/src/main/java/io/sapient/SapientConfig.java#L82)
     * Instantiate the [NodeDispatcherConfig.java](src/main/java/io/sapient/transmission/NodeDispatcherConfig.java)
     * Instantiate the [SocketClient.java](src/main/java/io/sapient/transport/SocketClient.java)
     * Instantiate the [NodeDispatcher.java](src/main/java/io/sapient/transmission/NodeDispatcher.java)

@@ -31,7 +31,7 @@ import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 class SocketClientReconnectTest {
 
     private final ArrayBlockingQueue<SapientMessage> received = new ArrayBlockingQueue<>(8);
-    private final SocketProvider supplier = mock(SocketProvider.class);
+    private final ISocketProvider supplier = mock(ISocketProvider.class);
     private final SocketClient client = spy(new SocketClient(supplier));
 
     @BeforeEach

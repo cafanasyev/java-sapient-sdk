@@ -31,7 +31,7 @@ public class SslContextFactory {
      * @param clientKey private key bytes (PEM or DER, PKCS#8, PKCS#1, or SEC1/EC)
      * @param clientCert X.509 client certificate bytes (DER or PEM)
      * @param caCert X.509 CA certificate bytes (DER or PEM)
-     * @return a configured SSLContext ready for use with {@link SocketProvider}
+     * @return a configured SSLContext ready for use with {@link ISocketProvider}
      * @throws GeneralSecurityException if key/certificate processing fails
      * @throws IOException if reading the input bytes fails
      */

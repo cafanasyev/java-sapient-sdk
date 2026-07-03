@@ -10,8 +10,8 @@ import static org.mockito.Mockito.*;
 import com.github.f4b6a3.ulid.Ulid;
 import io.sapient.transport.ConnectionState;
 import io.sapient.transport.IClient;
+import io.sapient.transport.ISocketProvider;
 import io.sapient.transport.SocketClient;
-import io.sapient.transport.SocketProvider;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -1565,8 +1565,8 @@ class NodeDispatcherTest {
         }
     }
 
-    private static SocketProvider socketProvider(AtomicInteger port) {
-        return new SocketProvider() {
+    private static ISocketProvider socketProvider(AtomicInteger port) {
+        return new ISocketProvider() {
             @Override
             public Socket get() throws IOException {
                 return new Socket("localhost", port.get());

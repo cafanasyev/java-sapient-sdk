@@ -6,7 +6,7 @@
 
     <groupId>io.github.cafanasyev</groupId>
     <artifactId>java-sapient-sdk</artifactId>
-    <version>0.3.0</version>
+    <version>0.3.1</version>
 
     <name>BSI Flex 335 v2.0 SAPIENT Java SDK</name>
     <description>Java SDK for BSI Flex 335 v2.0 SAPIENT</description>

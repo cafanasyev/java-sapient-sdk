@@ -3,7 +3,7 @@ package io.sapient;
 import io.sapient.transmission.NodeDispatcher;
 import io.sapient.transmission.NodeDispatcherConfig;
 import io.sapient.transport.SocketClient;
-import io.sapient.transport.SocketProvider;
+import io.sapient.transport.ISocketProvider;
 import io.sapient.transport.TestServer;
 import java.io.IOException;
 import java.net.Socket;
@@ -28,7 +28,7 @@ class SapientSdkIT {
 
         SocketClient client =
                 new SocketClient(
-                        new SocketProvider() {
+                        new ISocketProvider() {
                             @Override
                             public Socket get() throws IOException {
                                 return socket(server.getLocalPort());
