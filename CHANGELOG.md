@@ -80,7 +80,7 @@ no ICMP dependency.
 
 ---
 
-## 3 — §4.9 re-registration after prolonged connection loss
+## 3 — re-registration after prolonged connection loss
 
 ### Problem
 
