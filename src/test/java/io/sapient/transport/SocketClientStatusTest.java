@@ -23,8 +23,8 @@ import org.junit.jupiter.api.parallel.ExecutionMode;
 @Execution(ExecutionMode.CONCURRENT)
 class SocketClientStatusTest {
 
-    private static SocketProvider plainProvider(int port) {
-        return new SocketProvider() {
+    private static ISocketProvider plainProvider(int port) {
+        return new ISocketProvider() {
             @Override
             public Socket get() throws IOException {
                 return new Socket("localhost", port);
@@ -44,7 +44,7 @@ class SocketClientStatusTest {
 
     @Test
     void testInitialStateIsDisconnected() {
-        var client = new SocketClient(mock(SocketProvider.class));
+        var client = new SocketClient(mock(ISocketProvider.class));
         assertEquals(ConnectionState.DISCONNECTED, client.getState());
         assertFalse(client.isConnected());
         client.close();
@@ -52,7 +52,7 @@ class SocketClientStatusTest {
 
     @Test
     void testIsConnectedOnlyWhenStateIsConnected() {
-        var client = new SocketClient(mock(SocketProvider.class));
+        var client = new SocketClient(mock(ISocketProvider.class));
         assertFalse(client.isConnected()); // DISCONNECTED initially
         client.close();
         assertFalse(client.isConnected()); // CLOSED after close
@@ -60,7 +60,7 @@ class SocketClientStatusTest {
 
     @Test
     void testStateIsClosedAfterClientClose() throws InterruptedException {
-        var client = new SocketClient(mock(SocketProvider.class));
+        var client = new SocketClient(mock(ISocketProvider.class));
         var states = new LinkedBlockingQueue<ConnectionState>();
         client.addStateChangeListener((s, ts) -> states.add(s));
 
@@ -114,7 +114,7 @@ class SocketClientStatusTest {
 
     @Test
     void testMultipleListenersAllNotified() throws InterruptedException {
-        var client = new SocketClient(mock(SocketProvider.class));
+        var client = new SocketClient(mock(ISocketProvider.class));
         var states1 = new LinkedBlockingQueue<ConnectionState>();
         var states2 = new LinkedBlockingQueue<ConnectionState>();
         client.addStateChangeListener((s, ts) -> states1.add(s));
@@ -128,7 +128,7 @@ class SocketClientStatusTest {
 
     @Test
     void testRemovedListenerNotNotified() throws InterruptedException {
-        var client = new SocketClient(mock(SocketProvider.class));
+        var client = new SocketClient(mock(ISocketProvider.class));
         var states = new LinkedBlockingQueue<ConnectionState>();
         BiConsumer<ConnectionState, Instant> listener = (s, ts) -> states.add(s);
 
@@ -166,7 +166,7 @@ class SocketClientStatusTest {
 
     @Test
     void testStateChangeListenerReceivesTimestamp() throws InterruptedException {
-        var client = new SocketClient(mock(SocketProvider.class));
+        var client = new SocketClient(mock(ISocketProvider.class));
         var timestamps = new LinkedBlockingQueue<Instant>();
         Instant before = Instant.now();
 

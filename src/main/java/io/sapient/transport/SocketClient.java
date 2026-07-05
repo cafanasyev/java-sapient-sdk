@@ -40,7 +40,7 @@ public class SocketClient implements IClient {
         private final InputStream in;
         private final OutputStream out;
 
-        private Connection(SocketProvider socketProvider) throws IOException {
+        private Connection(ISocketProvider socketProvider) throws IOException {
             socket = socketProvider.get();
             in = socket.getInputStream();
             out = socket.getOutputStream();
@@ -70,7 +70,7 @@ public class SocketClient implements IClient {
     private static final Duration DEFAULT_INITIAL_RECONNECT_DELAY = Duration.ofSeconds(1);
     private static final Duration DEFAULT_WATCHDOG_INTERVAL = Duration.ofSeconds(10);
 
-    private final SocketProvider socketProvider;
+    private final ISocketProvider socketProvider;
     private final Duration probeTimeout;
     private final Duration initialReconnectDelay;
     private final Duration watchdogInterval;
@@ -80,7 +80,7 @@ public class SocketClient implements IClient {
      *
      * @param socketProvider supplies new socket connections and describes the remote address
      */
-    public SocketClient(@NonNull SocketProvider socketProvider) {
+    public SocketClient(@NonNull ISocketProvider socketProvider) {
         this(
                 socketProvider,
                 DEFAULT_PROBE_TIMEOUT,
@@ -101,7 +101,7 @@ public class SocketClient implements IClient {
      *     probeTimeout}
      */
     public SocketClient(
-            @NonNull SocketProvider socketProvider,
+            @NonNull ISocketProvider socketProvider,
             @NonNull Duration probeTimeout,
             @NonNull Duration initialReconnectDelay,
             @NonNull Duration watchdogInterval) {

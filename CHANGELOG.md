@@ -40,7 +40,7 @@ whether a remote endpoint was reachable — short of attempting a publish and wa
 This made it impossible to build a meaningful health indicator or UI status display without
 coupling to internal state.
 
-Additionally, `SocketProvider` was a `@FunctionalInterface` that hid the host and port inside a
+Additionally, `ISocketProvider` was a `@FunctionalInterface` that hid the host and port inside a
 lambda, making the client unable to perform a reachability probe independently of the managed
 connection.
 
@@ -57,7 +57,7 @@ connection.
   `Instant` at which the transition occurred, captured once before notifying all registered
   listeners so every listener sees a consistent timestamp for the same event.
 
-- **Enrich `SocketProvider`** with `host()` and `port()` methods. No longer a `@FunctionalInterface`.
+- **Enrich `ISocketProvider`** with `host()` and `port()` methods. No longer a `@FunctionalInterface`.
   Carrying the address explicitly allows `SocketClient` to open a raw probe socket without touching
   the managed connection.
 
@@ -80,7 +80,7 @@ no ICMP dependency.
 
 ---
 
-## 3 — §4.9 re-registration after prolonged connection loss
+## 3 — re-registration after prolonged connection loss
 
 ### Problem
 
