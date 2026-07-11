@@ -105,6 +105,10 @@ implementation("io.github.cafanasyev:java-sapient-sdk:0.3.1")
    * regularly check whether the Node is online;
    * when a node is online — obtain the Registration message from the Node implementation and send it to the fusion node (server);
    * maintain the keep-alive with automatic sending of Status Reports (based on the interval stated in its Registration);
+   * automatically spread (jitter) status reports and registrations across time so multiple nodes never send in lockstep and reconnecting clients don't create a traffic burst (you don't need to implement any of this yourself):
+     * a one-time random phase offset in `[0, statusInterval)` before the first status report of each (re-)registered loop, so nodes that share a `statusInterval` don't start in sync;
+     * a fresh per-cycle jitter of `statusInterval ± 10%` on every subsequent StatusReport, so nodes drift apart instead of re-synchronising — the mean send rate stays exactly `statusInterval`, and the ±10% stays well inside the protocol's 3-missed-report budget;
+     * a random delay in `[0, registrationJitterWindow)` (default 2 seconds) before every registration/re-registration, to spread the registration storm when many clients reconnect at once (e.g. after a fusion-server restart). Tune it via `NodeDispatcherConfig.registrationJitterWindow` (set `Duration.ZERO` to disable, e.g. in tests). The reasoning is described in [CHANGELOG.md](CHANGELOG.md) (point 5);
    * if a node becomes offline — send a GOOD BYE Status Report to de-register the Node;
    * route server messages to the required Node (see the callback methods of the [INode.java](src/main/java/io/sapient/transmission/INode.java) interface);
    * keep the connection open as long as at least one online Node is provided;
