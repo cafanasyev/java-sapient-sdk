@@ -5,6 +5,9 @@
 
 Java SDK for [BSI Flex 335 v2.0](https://www.bsigroup.com/en-US/insights-and-media/insights/brochures/bsi-flex-335-interface-of-the-sapient-sensor-management-specification/) SAPIENT — a protocol standard for autonomous sensor and effector interoperability. The SDK provides TCP client connectivity and node dispatching for communicating with SAPIENT fusion nodes using Protobuf-serialized messages.
 
+Python counterpart:
+[py-sapient-sdk](https://github.com/cafanasyev/py-sapient-sdk).
+
 ## Requirements
 
 - Java 21+
@@ -92,7 +95,7 @@ implementation("io.github.cafanasyev:java-sapient-sdk:0.3.1")
 1. Implement the [INode.java](src/main/java/io/sapient/transmission/INode.java) interface for each Node you want to connect.
    All methods are supplied with comments explaining their purpose.
 2. Create an instance of the [NodeDispatcher.java](src/main/java/io/sapient/transmission/NodeDispatcher.java). In order to do so:
-    * Implement the [ISocketProvider.java](src/main/java/io/sapient/transport/ISocketProvider.java) interface. For the default TLS based connection use the already implemented [SslContextFactory.java](src/main/java/io/sapient/transport/SslContextFactory.java). For a non-TLS connection you can use: [`SapientConfig.java:82`](https://github.com/cafanasyev/java-sapient-test-harness/blob/cd5dab8/src/main/java/io/sapient/SapientConfig.java#L82)
+    * Implement the [ISocketProvider.java](src/main/java/io/sapient/transport/ISocketProvider.java) interface. For the default TLS based connection use the already implemented [SslContextFactory.java](src/main/java/io/sapient/transport/SslContextFactory.java), whose `create(clientKey, clientCert, caCert)` builds the `SSLContext`. All three arguments are required, and each is the certificate/key content itself as a `byte[]` — the factory takes no file paths, so load the bytes from wherever you keep them. Both PEM and DER encodings are accepted (keys: PKCS#8, PKCS#1, SEC1/EC). Using this factory is optional: implement `ISocketProvider` yourself to supply any `SSLContext` (or `Socket`) you like. For a non-TLS connection you can use: [`SapientConfig.java:82`](https://github.com/cafanasyev/java-sapient-test-harness/blob/cd5dab8/src/main/java/io/sapient/SapientConfig.java#L82)
     * Instantiate the [NodeDispatcherConfig.java](src/main/java/io/sapient/transmission/NodeDispatcherConfig.java)
     * Instantiate the [SocketClient.java](src/main/java/io/sapient/transport/SocketClient.java)
     * Instantiate the [NodeDispatcher.java](src/main/java/io/sapient/transmission/NodeDispatcher.java)
@@ -101,28 +104,34 @@ implementation("io.github.cafanasyev:java-sapient-sdk:0.3.1")
    Use the default provided values of the variables from the test-harness sample.
    The purpose of each variable is documented at the classes which use those variables.
    Also, the reasoning behind the `socketWatchdogInterval`, `socketProbeTimeout`, `socketInitialReconnectDelay`, and `connectionLossDetectionDelay` variables is described inside [CHANGELOG.md](CHANGELOG.md) (points 3 and 4).
-3. Pass your INode implementations to the `NodeDispatcher.register(INode node)` method. Doing so will make the Dispatcher:
-   * regularly check whether the Node is online;
-   * when a node is online — obtain the Registration message from the Node implementation and send it to the fusion node (server);
-   * maintain the keep-alive with automatic sending of Status Reports (based on the interval stated in its Registration);
-   * automatically spread (jitter) status reports and registrations across time so multiple nodes never send in lockstep and reconnecting clients don't create a traffic burst (you don't need to implement any of this yourself):
-     * a one-time random phase offset in `[0, statusInterval)` before the first status report of each (re-)registered loop, so nodes that share a `statusInterval` don't start in sync;
-     * a fresh per-cycle jitter of `statusInterval ± 10%` on every subsequent StatusReport, so nodes drift apart instead of re-synchronising — the mean send rate stays exactly `statusInterval`, and the ±10% stays well inside the protocol's 3-missed-report budget;
-     * a random delay in `[0, registrationJitterWindow)` (default 2 seconds) before every registration/re-registration, to spread the registration storm when many clients reconnect at once (e.g. after a fusion-server restart). Tune it via `NodeDispatcherConfig.registrationJitterWindow` (set `Duration.ZERO` to disable, e.g. in tests). The reasoning is described in [CHANGELOG.md](CHANGELOG.md) (point 5);
-   * if a node becomes offline — send a GOOD BYE Status Report to de-register the Node;
-   * route server messages to the required Node (see the callback methods of the [INode.java](src/main/java/io/sapient/transmission/INode.java) interface);
-   * keep the connection open as long as at least one online Node is provided;
-   * close the connection if no online Nodes are present;
-   * re-open the connection if at least one online Node appears;
-   * automatically set StatusReport.Info to INFO_UNCHANGED if the last message doesn't have any change (you don't need to implement this yourself);
-   * automatically populate StatusReport.ReportId if it's blank;
-   * automatically populate DetectionReport.ReportId if it's blank;
+3. Pass your INode implementations to the `NodeDispatcher.register(INode node)` method. This is what makes the Dispatcher automate node lifecycle management for you — see [Automated Node Lifecycle Behavior](#automated-node-lifecycle-behavior) below for the full list of what that gets you for free. (The reasoning behind the jitter design is described in [CHANGELOG.md](CHANGELOG.md), point 5.)
 4. Stop managing a Node with `NodeDispatcher.unregister(INode node)` when you no longer want the Dispatcher to report for it.
 5. Close the Dispatcher with `NodeDispatcher.close()` (it is `AutoCloseable`, so try-with-resources works) to shut down the connection and its background threads when you are done.
 6. OPTIONALLY:
    * Use the Node Dispatcher to send Detection Reports/Alerts/TaskAcks via the typed `NodeDispatcher.publish(...)` overloads (`publish(DetectionReport|Alert|TaskAck, UUID nodeId, Duration timeout)`);
    * You can invoke sending of Registrations/Status Reports outside of the Node Dispatcher automatic lifecycle — for example if you want to notify the Server about some changes immediately without waiting for the next interval — using the `publish(Registration|StatusReport, UUID nodeId, Duration timeout)` overloads;
    * Call [`IClient.addStateChangeListener(...)`](src/main/java/io/sapient/transport/IClient.java#L65) to subscribe to connection state changes (and [`removeStateChangeListener(...)`](src/main/java/io/sapient/transport/IClient.java#L73) to unsubscribe). You may want to log or run additional logic when, for example, the connection is lost for a prolonged period. You can also poll the connection directly with `getState()`, `isConnected()`, and `probeReachable(Duration)`.
+
+### Automated Node Lifecycle Behavior
+
+Everything `NodeDispatcher.register(node)` automates for you — you don't need to implement any of this yourself — compared across both SDKs:
+
+| Behavior | Details | Java | Python |
+|---|---|---|---|
+| Regularly poll `INode.isOnline()`/`is_online()` to detect online/offline transitions | Drives every other behavior below. | ✅ | ✅ |
+| Auto-send Registration when a node comes online | Obtains the Registration message from the node implementation and sends it to the fusion node (server). | ✅ | ✅ |
+| Auto Status Report keep-alive | Sends automatic Status Reports on the interval stated in the node's Registration. | ✅ | ✅ |
+| Jitter — one-time phase offset before first status report | A one-time random phase offset in `[0, statusInterval)` before the first status report of each (re-)registered loop, so nodes that share a `statusInterval` don't start in sync. | ✅ | ✅ |
+| Jitter — ±10% per-cycle on subsequent status reports | A fresh per-cycle jitter of `statusInterval ± 10%` on every subsequent Status Report, so nodes drift apart instead of re-synchronising — the mean send rate stays exactly `statusInterval`, and the ±10% stays well inside the protocol's 3-missed-report budget. | ✅ | ✅ |
+| Jitter — random delay before registration/re-registration | A random delay in `[0, registrationJitterWindow)` (default 2 seconds) before every registration/re-registration, to spread the registration storm when many clients reconnect at once (e.g. after a fusion-server restart). Tunable; set to `0`/`Duration.ZERO` to disable, e.g. in tests. | ✅ | ✅ |
+| Auto GOOD BYE Status Report on going offline | Sends a GOOD BYE Status Report to de-register the node when it becomes offline. | ✅ | ✅ |
+| Route server messages to the node's callbacks | Routes server messages (RegistrationAck, AlertAck, Error, Task) to the required node's callback methods. | ✅ | ✅ |
+| Open connection when a node comes online | Keeps the connection open as long as at least one online node is registered. | ✅ | ✅ |
+| Close connection when no nodes are online | Closes the connection once no online nodes are left. | ✅ | ✅ |
+| Re-open connection when a node comes online again | Re-opens the connection if at least one online node reappears. | ✅ | ✅ |
+| Auto `StatusReport.Info = INFO_UNCHANGED` when unchanged | Set automatically if the last message has no changes, so unchanged reports aren't treated as new events. | ✅ | ✅ |
+| Auto-populate `StatusReport.ReportId` if blank | Fills in a fresh ULID before sending, so callers don't need to mint one themselves. | ✅ | ✅ |
+| Auto-populate `DetectionReport.ReportId` if blank | Fills in a fresh ULID before sending, so callers don't need to mint one themselves. | ✅ | ✅ |
 
 ### Logging
 
