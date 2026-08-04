@@ -429,3 +429,35 @@ A node is now notified whenever the server sends it an `Error`, with the full `E
 `Error` is always logged at DEBUG by the shared incoming-message logging added in §9 — independent
 of message routing, so it is logged whether or not a node is registered for the destination. No
 Error-specific logging is needed.
+
+## 11 — Auto-populate StatusReport.Info when the node leaves it unset
+
+### Problem
+
+`info` is a mandatory field of `StatusReport` (BSI Flex 335 v2.0). The SDK only acted on it when the
+node set `INFO_NEW`: such a report was downgraded to `INFO_UNCHANGED` when the content repeated the
+previous one. A node that left `info` unset published `INFO_UNSPECIFIED`, and its reports never took 
+part in de-duplication at all.
+
+A goodbye report had the same gap. It is sent from `NodeWrapper.close()` on top of whatever
+`node.getStatusReport()` returns, so it usually carried no `info` either.
+
+### Decision
+
+- **Fill `info` at publish time when the node leaves it unset.** `NodeDispatcher` compares the
+  report against the previous one of the same node: `INFO_UNCHANGED` when the content repeats,
+  `INFO_NEW` otherwise. For an unknown (not registered) node there is nothing to compare with, so
+  the value is `INFO_NEW`.
+
+- **Always set `INFO_NEW` on a goodbye** (`system = SYSTEM_GOODBYE`) and keep it out of
+  de-duplication. A node leaving is new information even when the rest of the report did not change.
+
+- **Keep an explicit `INFO_UNCHANGED` from the node as sent.** The node states that the content
+  repeats, so the SDK does not second-guess it. An explicit `INFO_NEW` still gets the existing
+  downgrade to `INFO_UNCHANGED` on repeated content (§7).
+
+### Result
+
+Every published `StatusReport` carries a valid `info`, so nodes no longer have to set the field
+themselves to stay protocol-compliant. De-duplication now works for those nodes as well: identical
+reports go out as `INFO_UNCHANGED`, and a goodbye always goes out as `INFO_NEW`.

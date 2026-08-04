@@ -783,7 +783,7 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
-    void publishDoesNotForceInfoOnGoodbyeStatusReport() throws Exception {
+    void publishSetsInfoNewOnGoodbyeStatusReport() throws Exception {
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
                 new NodeDispatcher(
@@ -797,7 +797,31 @@ class NodeDispatcherTest {
 
         SapientMessage msg = capturePublished(client);
         assertEquals(StatusReport.System.SYSTEM_GOODBYE, msg.getStatusReport().getSystem());
-        assertEquals(StatusReport.Info.INFO_UNSPECIFIED, msg.getStatusReport().getInfo());
+        assertEquals(StatusReport.Info.INFO_NEW, msg.getStatusReport().getInfo());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void goodbyeStatusReportIsNeverDowngradedToUnchanged() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+        dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
+
+        StatusReport report = StatusReport.newBuilder().setMode("patrol").build();
+        dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(
+                report.toBuilder().setSystem(StatusReport.System.SYSTEM_GOODBYE).build(),
+                nodeId,
+                Duration.ofSeconds(1));
+
+        ArgumentCaptor<SapientMessage> captor = ArgumentCaptor.forClass(SapientMessage.class);
+        verify(client, times(2)).publish(captor.capture(), any(Duration.class));
+        SapientMessage goodbye = captor.getAllValues().get(1);
+        assertEquals(StatusReport.Info.INFO_NEW, goodbye.getStatusReport().getInfo());
         dispatcher.close();
     }
 
@@ -905,6 +929,110 @@ class NodeDispatcherTest {
         verify(client, times(2)).publish(captor.capture(), any(Duration.class));
         SapientMessage second = captor.getAllValues().get(1);
         assertEquals(StatusReport.Info.INFO_NEW, second.getStatusReport().getInfo());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void unsetStatusReportInfoBecomesNewOnFirstPublish() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+        dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
+
+        dispatcher.publish(
+                StatusReport.newBuilder().setMode("patrol").build(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(StatusReport.Info.INFO_NEW, msg.getStatusReport().getInfo());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void unsetStatusReportInfoBecomesNewForUnknownNode() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+
+        dispatcher.publish(
+                StatusReport.getDefaultInstance(), UUID.randomUUID(), Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(StatusReport.Info.INFO_NEW, msg.getStatusReport().getInfo());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void unsetStatusReportInfoBecomesUnchangedOnIdenticalPublish() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+        dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
+
+        StatusReport report = StatusReport.newBuilder().setMode("patrol").build();
+        dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
+
+        ArgumentCaptor<SapientMessage> captor = ArgumentCaptor.forClass(SapientMessage.class);
+        verify(client, times(2)).publish(captor.capture(), any(Duration.class));
+        assertEquals(
+                StatusReport.Info.INFO_NEW,
+                captor.getAllValues().get(0).getStatusReport().getInfo());
+        assertEquals(
+                StatusReport.Info.INFO_UNCHANGED,
+                captor.getAllValues().get(1).getStatusReport().getInfo());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void unsetStatusReportInfoBecomesNewOnChangedPublish() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+        dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
+
+        dispatcher.publish(
+                StatusReport.newBuilder().setMode("patrol").build(), nodeId, Duration.ofSeconds(1));
+        dispatcher.publish(
+                StatusReport.newBuilder().setMode("alert").build(), nodeId, Duration.ofSeconds(1));
+
+        ArgumentCaptor<SapientMessage> captor = ArgumentCaptor.forClass(SapientMessage.class);
+        verify(client, times(2)).publish(captor.capture(), any(Duration.class));
+        SapientMessage second = captor.getAllValues().get(1);
+        assertEquals(StatusReport.Info.INFO_NEW, second.getStatusReport().getInfo());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void explicitStatusReportInfoUnchangedIsKept() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+        dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
+
+        dispatcher.publish(
+                StatusReport.newBuilder()
+                        .setMode("patrol")
+                        .setInfo(StatusReport.Info.INFO_UNCHANGED)
+                        .build(),
+                nodeId,
+                Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(StatusReport.Info.INFO_UNCHANGED, msg.getStatusReport().getInfo());
         dispatcher.close();
     }
 

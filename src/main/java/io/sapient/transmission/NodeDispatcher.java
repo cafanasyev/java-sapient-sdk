@@ -296,14 +296,33 @@ public class NodeDispatcher implements INodeDispatcher {
         if (status.getReportId().isBlank()) {
             status = status.toBuilder().setReportId(newReportId()).build();
         }
-        NodeWrapper node = findNode(nodeId);
-        if (node != null && status.getInfo() == StatusReport.Info.INFO_NEW) {
-            StatusReport prev = node.getLastStatusReport().getAndSet(status);
-            if (prev != null && contentEquals(prev, status)) {
-                status = status.toBuilder().setInfo(StatusReport.Info.INFO_UNCHANGED).build();
-            }
-        }
+        status = withInfo(status, findNode(nodeId));
         return publish(SapientMessage.newBuilder().setStatusReport(status), nodeId, timeout);
+    }
+
+    /**
+     * Fills the mandatory {@code info} field of a status report. A goodbye always reports new
+     * information, so it is set to INFO_NEW and never de-duplicated. For any other report the value
+     * is INFO_UNCHANGED when the content repeats the previous report of the same node, and INFO_NEW
+     * otherwise. An explicit INFO_UNCHANGED from the caller is kept as sent.
+     *
+     * <p>A node that leaves {@code info} unset gets a valid value instead of INFO_UNSPECIFIED.
+     */
+    private static StatusReport withInfo(StatusReport status, NodeWrapper node) {
+        if (status.getSystem() == StatusReport.System.SYSTEM_GOODBYE) {
+            return withInfo(status, StatusReport.Info.INFO_NEW);
+        }
+        if (status.getInfo() == StatusReport.Info.INFO_UNCHANGED) return status;
+        // unknown node: no previous report to compare with, so the content is new
+        if (node == null) return withInfo(status, StatusReport.Info.INFO_NEW);
+        StatusReport prev = node.getLastStatusReport().getAndSet(status);
+        boolean unchanged = prev != null && contentEquals(prev, status);
+        return withInfo(
+                status, unchanged ? StatusReport.Info.INFO_UNCHANGED : StatusReport.Info.INFO_NEW);
+    }
+
+    private static StatusReport withInfo(StatusReport status, StatusReport.Info info) {
+        return status.getInfo() == info ? status : status.toBuilder().setInfo(info).build();
     }
 
     /**
