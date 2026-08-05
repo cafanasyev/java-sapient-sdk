@@ -25,6 +25,9 @@ import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 @Slf4j
 class NodeWrapper implements AutoCloseable {
 
+    /** How long {@link #close()} waits for the lifecycle thread before giving up on it. */
+    private static final Duration THREAD_STOP_TIMEOUT = Duration.ofSeconds(5);
+
     @Getter @NonNull private final INode node;
     @Getter private final AtomicBoolean registered = new AtomicBoolean(false);
     @Getter private final AtomicReference<StatusReport> lastStatusReport = new AtomicReference<>();
@@ -175,10 +178,16 @@ class NodeWrapper implements AutoCloseable {
         }
     }
 
+    /**
+     * Stops the node and sends its goodbye. Returns only once the lifecycle thread has terminated,
+     * so nothing this node does can still reach the transport afterwards — the dispatcher relies on
+     * that to close the client only after every node is done with it.
+     */
     @Override
     public void close() {
         log.info("stopping node: {} gracefully", node.getNodeId());
         thread.interrupt();
+        awaitThreadStop();
         if (!registered.getAndSet(false)) return;
         try {
             log.info("sending goodbye for the node: {}", node.getNodeId());
@@ -187,6 +196,25 @@ class NodeWrapper implements AutoCloseable {
             log.error("failed to send goodbye for the node: {}", node.getNodeId(), e);
         }
         log.info("node: {} gracefully stopped", node.getNodeId());
+    }
+
+    private void awaitThreadStop() {
+        if (thread == Thread.currentThread()) {
+            return;
+        }
+        try {
+            thread.join(THREAD_STOP_TIMEOUT);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("interrupted while stopping node: {}", node.getNodeId());
+            return;
+        }
+        if (thread.isAlive()) {
+            log.error(
+                    "node: {} did not stop within {} — it may still publish",
+                    node.getNodeId(),
+                    THREAD_STOP_TIMEOUT);
+        }
     }
 
     private void sendGoodbye() throws TimeoutException, InterruptedException {

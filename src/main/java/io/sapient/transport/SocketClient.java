@@ -39,6 +39,7 @@ public class SocketClient implements IClient {
         private final Socket socket;
         private final InputStream in;
         private final OutputStream out;
+        private final AtomicBoolean closed = new AtomicBoolean(false);
 
         private Connection(ISocketProvider socketProvider) throws IOException {
             socket = socketProvider.get();
@@ -46,8 +47,16 @@ public class SocketClient implements IClient {
             out = socket.getOutputStream();
         }
 
+        /**
+         * Closes the socket, at most once. The run loop, the watchdog and {@link
+         * SocketClient#close()} all reach for the same connection, so the flag keeps them from
+         * closing the socket several times over.
+         */
         @Override
         public void close() {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
             log.info("closing socket");
             // SSLSocket.close() can block on a dead TLS connection; don't wait for it.
             Thread.startVirtualThread(
@@ -61,14 +70,22 @@ public class SocketClient implements IClient {
                     });
         }
 
-        private boolean isConnected() {
-            return socket.isConnected();
+        /**
+         * Returns {@code true} while this connection can still carry a message. {@link
+         * Socket#isConnected()} alone is not enough: it stays {@code true} for the rest of the
+         * socket's life once the connection was established, closed or not.
+         */
+        private boolean isUsable() {
+            return !closed.get() && socket.isConnected() && !socket.isClosed();
         }
     }
 
     private static final Duration DEFAULT_PROBE_TIMEOUT = Duration.ofSeconds(2);
     private static final Duration DEFAULT_INITIAL_RECONNECT_DELAY = Duration.ofSeconds(1);
     private static final Duration DEFAULT_WATCHDOG_INTERVAL = Duration.ofSeconds(10);
+
+    /** How long {@link #close()} waits for the run loop to finish before giving up on it. */
+    private static final Duration RUN_LOOP_STOP_TIMEOUT = Duration.ofSeconds(5);
 
     private final ISocketProvider socketProvider;
     private final Duration probeTimeout;
@@ -125,10 +142,18 @@ public class SocketClient implements IClient {
     private final List<BiConsumer<ConnectionState, Instant>> stateListeners = new ArrayList<>();
     private final ReadWriteLock listenersLock = new ReentrantReadWriteLock();
 
+    // the thread running runLoop(), or null while no run loop is alive. Cleared by close()
+    // only after the loop has actually terminated, so a client can never end up with two.
+    private volatile Thread runLoopThread;
+
     @Override
     public void start() {
+        if (runLoopThread != null) {
+            log.warn("client is already running");
+            return;
+        }
         if (running.compareAndSet(false, true)) {
-            Thread.startVirtualThread(this::runLoop);
+            runLoopThread = Thread.startVirtualThread(this::runLoop);
         }
     }
 
@@ -150,7 +175,9 @@ public class SocketClient implements IClient {
             setState(ConnectionState.CONNECTING);
 
             Thread watchdog = null;
-            try (Connection conn = connect()) {
+            Connection conn = null;
+            try {
+                conn = connect();
                 reconnectAttempts = 0;
                 setState(ConnectionState.CONNECTED);
                 watchdog = startWatchdog(conn);
@@ -166,6 +193,12 @@ public class SocketClient implements IClient {
             } finally {
                 if (watchdog != null) {
                     watchdog.interrupt();
+                }
+                if (conn != null) {
+                    // take the connection out of the slot before closing it, or a publisher
+                    // would pick up a dead connection and write into a closed socket
+                    connectionSlot.remove(conn);
+                    conn.close();
                 }
                 setState(ConnectionState.DISCONNECTED);
             }
@@ -191,14 +224,44 @@ public class SocketClient implements IClient {
         }
     }
 
+    /**
+     * Stops the client and waits for its run loop to terminate. Safe to call several times and from
+     * several threads; only the first call has an effect. Waiting for the loop is what makes {@link
+     * #start()} safe to call afterwards — a client closed while its run loop sat in a reconnect
+     * backoff would otherwise be left with two loops competing for the same connection.
+     */
     @Override
     public void close() {
         log.info("stopping client");
         running.set(false);
-        setState(ConnectionState.CLOSED);
+        Thread loop = runLoopThread;
+        if (loop != null) {
+            loop.interrupt();
+        }
         Connection conn = connectionSlot.poll();
         if (conn != null) {
             conn.close();
+        }
+        awaitRunLoopStop(loop);
+        setState(ConnectionState.CLOSED);
+    }
+
+    private void awaitRunLoopStop(Thread loop) {
+        if (loop == null || loop == Thread.currentThread()) {
+            return;
+        }
+        try {
+            loop.join(RUN_LOOP_STOP_TIMEOUT);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("interrupted while waiting for the run loop to stop");
+            return;
+        }
+        if (loop.isAlive()) {
+            // leave runLoopThread set so start() refuses to add a second loop on top of it
+            log.error("run loop did not stop within {}", RUN_LOOP_STOP_TIMEOUT);
+        } else {
+            runLoopThread = null;
         }
     }
 
@@ -240,7 +303,7 @@ public class SocketClient implements IClient {
                 throw new TimeoutException("publish timeout");
             }
 
-            if (!conn.isConnected()) {
+            if (!conn.isUsable()) {
                 continue;
             }
 
@@ -255,7 +318,7 @@ public class SocketClient implements IClient {
                                 .array();
                 conn.out.write(frame);
                 conn.out.flush();
-                if (conn.isConnected() && !connectionSlot.offer(conn)) {
+                if (conn.isUsable() && !connectionSlot.offer(conn)) {
                     log.error("failed to return connection to slot");
                 }
                 return;
