@@ -1,10 +1,12 @@
 package io.sapient.transmission;
 
+import static io.sapient.transmission.NodeDispatcherTest.AWAIT_MS;
 import static io.sapient.transmission.NodeDispatcherTest.FUSION_NODE_ID;
 import static io.sapient.transmission.NodeDispatcherTest.captureSubscription;
 import static io.sapient.transmission.NodeDispatcherTest.mockNode;
 import static io.sapient.transmission.NodeDispatcherTest.sendAck;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doAnswer;
@@ -17,6 +19,8 @@ import static org.mockito.Mockito.when;
 import io.sapient.transport.IClient;
 import java.time.Duration;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
@@ -31,8 +35,8 @@ import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 @Execution(ExecutionMode.CONCURRENT)
 class NodeDispatcherShutdownTest {
 
-    /** How long a node stays inside a callback after being asked to stop. */
-    private static final Duration SLOW_CALL = Duration.ofMillis(300);
+    /** How long a close() that does not wait for its nodes is given to run ahead. */
+    private static final Duration CLOSE_HEADSTART = Duration.ofSeconds(1);
 
     private static NodeDispatcherConfig config() {
         return new NodeDispatcherConfig(
@@ -45,12 +49,12 @@ class NodeDispatcherShutdownTest {
                 Duration.ZERO);
     }
 
-    private static void sleepIgnoringInterruption(Duration duration) {
-        long deadline = System.nanoTime() + duration.toNanos();
+    /** Waits for the latch, restoring the interrupt flag afterwards instead of bailing out. */
+    private static void awaitIgnoringInterruption(CountDownLatch latch) {
         boolean interrupted = false;
-        while (System.nanoTime() < deadline) {
+        while (latch.getCount() > 0) {
             try {
-                Thread.sleep(20);
+                latch.await();
             } catch (InterruptedException e) {
                 interrupted = true;
             }
@@ -72,8 +76,17 @@ class NodeDispatcherShutdownTest {
                         m.getContentCase() == SapientMessage.ContentCase.STATUS_REPORT);
     }
 
+    /** A status report from the status loop, as opposed to the goodbye sent by {@code close()}. */
+    private static SapientMessage isLiveStatusReport() {
+        return argThat(
+                (SapientMessage m) ->
+                        m.getContentCase() == SapientMessage.ContentCase.STATUS_REPORT
+                                && m.getStatusReport().getSystem()
+                                        != StatusReport.System.SYSTEM_GOODBYE);
+    }
+
     @Test
-    @Timeout(10)
+    @Timeout(20)
     void clientClosedExactlyOnceWhenNodesGoOfflineThenDispatcherCloses() throws Exception {
         UUID nodeId1 = UUID.randomUUID();
         UUID nodeId2 = UUID.randomUUID();
@@ -86,14 +99,14 @@ class NodeDispatcherShutdownTest {
         dispatcher.register(mockNode(nodeId1, online1, 50));
         dispatcher.register(mockNode(nodeId2, online2, 50));
 
-        verify(client, timeout(2000).atLeast(2)).publish(isRegistration(), any(Duration.class));
+        verify(client, timeout(AWAIT_MS).atLeast(2)).publish(isRegistration(), any(Duration.class));
         sendAck(onMessage, nodeId1, true);
         sendAck(onMessage, nodeId2, true);
-        verify(client, timeout(2000).atLeast(2)).publish(isStatusReport(), any(Duration.class));
+        verify(client, timeout(AWAIT_MS).atLeast(2)).publish(isStatusReport(), any(Duration.class));
 
         online1.set(false);
         online2.set(false);
-        verify(client, timeout(2000)).close();
+        verify(client, timeout(AWAIT_MS)).close();
 
         dispatcher.close();
         Thread.sleep(200);
@@ -102,7 +115,7 @@ class NodeDispatcherShutdownTest {
     }
 
     @Test
-    @Timeout(10)
+    @Timeout(20)
     void unregisterClosesClientWhenLastOnlineNodeRemoved() throws Exception {
         UUID nodeId = UUID.randomUUID();
         IClient client = mock(IClient.class);
@@ -111,20 +124,21 @@ class NodeDispatcherShutdownTest {
         Consumer<SapientMessage> onMessage = captureSubscription(client);
 
         dispatcher.register(node);
-        verify(client, timeout(2000)).publish(isRegistration(), any(Duration.class));
+        verify(client, timeout(AWAIT_MS)).publish(isRegistration(), any(Duration.class));
         sendAck(onMessage, nodeId, true);
-        verify(client, timeout(2000).atLeastOnce()).publish(isStatusReport(), any(Duration.class));
+        verify(client, timeout(AWAIT_MS).atLeastOnce())
+                .publish(isStatusReport(), any(Duration.class));
 
         dispatcher.unregister(node);
 
-        verify(client, timeout(2000)).close();
+        verify(client, timeout(AWAIT_MS)).close();
 
         dispatcher.close();
         verify(client, times(1)).close();
     }
 
     @Test
-    @Timeout(15)
+    @Timeout(25)
     void nodeDoesNotPublishAfterClientClosed() throws Exception {
         UUID nodeId = UUID.randomUUID();
         IClient client = mock(IClient.class);
@@ -149,32 +163,44 @@ class NodeDispatcherShutdownTest {
                 .when(client)
                 .publish(any(SapientMessage.class), any(Duration.class));
 
-        // A node that keeps running for a while after being asked to stop: it swallows the
-        // interruption but restores the flag on the way out, so the lifecycle thread still
-        // terminates once the call returns. Only the first call is slow — delaying the
+        // A node that stays inside its callback until this test lets it out, ignoring the
+        // interruption but restoring the flag on the way out so the lifecycle thread still
+        // terminates once the call returns. Only the first call blocks — holding up the
         // goodbye published by close() as well would hide the late status report behind it.
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
         AtomicBoolean firstCall = new AtomicBoolean(true);
-        Answer<StatusReport> slowStatusReport =
+        Answer<StatusReport> blockingStatusReport =
                 inv -> {
                     if (firstCall.compareAndSet(true, false)) {
-                        sleepIgnoringInterruption(SLOW_CALL);
+                        entered.countDown();
+                        awaitIgnoringInterruption(release);
                     }
                     return StatusReport.getDefaultInstance();
                 };
         INode node = mockNode(nodeId, new AtomicBoolean(true), 50);
-        when(node.getStatusReport()).thenAnswer(slowStatusReport);
+        when(node.getStatusReport()).thenAnswer(blockingStatusReport);
 
         NodeDispatcher dispatcher = new NodeDispatcher(client, config());
         Consumer<SapientMessage> onMessage = captureSubscription(client);
         dispatcher.register(node);
 
-        verify(client, timeout(2000)).publish(isRegistration(), any(Duration.class));
+        verify(client, timeout(AWAIT_MS)).publish(isRegistration(), any(Duration.class));
         sendAck(onMessage, nodeId, true);
-        // the node lifecycle thread is now inside the slow callback
-        verify(node, timeout(2000)).getStatusReport();
+        assertTrue(
+                entered.await(AWAIT_MS, TimeUnit.MILLISECONDS),
+                "the node lifecycle thread should be inside the callback");
 
-        dispatcher.close();
-        Thread.sleep(SLOW_CALL.toMillis() * 3);
+        // close() blocks until the node is done, so it cannot run on this thread
+        Thread closer = Thread.startVirtualThread(dispatcher::close);
+        // give a close() that does not wait for the node every chance to finish first
+        Thread.sleep(CLOSE_HEADSTART.toMillis());
+        release.countDown();
+
+        // the released node publishes the status report it was holding — wait for it, then
+        // for the close to finish, so the check below cannot run before either has happened
+        verify(client, timeout(AWAIT_MS)).publish(isLiveStatusReport(), any(Duration.class));
+        closer.join(AWAIT_MS);
 
         assertFalse(
                 publishedAfterClose.get(), "no message may reach the client after it was closed");

@@ -1,6 +1,6 @@
 package io.sapient.transport;
 
-import static java.util.concurrent.TimeUnit.SECONDS;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -33,6 +33,9 @@ import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 /** Shutdown behaviour of {@link SocketClient}: socket closing, restart, and stale connections. */
 @Execution(ExecutionMode.CONCURRENT)
 class SocketClientCloseTest {
+
+    /** Upper bound for waiting on an asynchronous event; see NodeDispatcherTest.AWAIT_MS. */
+    private static final long AWAIT_MS = 5000;
 
     private static final SapientMessage MESSAGE =
             SapientMessage.newBuilder().setStatusReport(StatusReport.getDefaultInstance()).build();
@@ -99,12 +102,12 @@ class SocketClientCloseTest {
 
     private static void awaitConnected(BlockingQueue<ConnectionState> states)
             throws InterruptedException {
-        assertEquals(ConnectionState.CONNECTING, states.poll(2, SECONDS));
-        assertEquals(ConnectionState.CONNECTED, states.poll(2, SECONDS));
+        assertEquals(ConnectionState.CONNECTING, states.poll(AWAIT_MS, MILLISECONDS));
+        assertEquals(ConnectionState.CONNECTED, states.poll(AWAIT_MS, MILLISECONDS));
     }
 
     @Test
-    @Timeout(10)
+    @Timeout(20)
     void socketClosedExactlyOnceWhenClientClosed() throws Exception {
         Endpoint ep = endpoint();
         var states = new LinkedBlockingQueue<ConnectionState>();
@@ -117,13 +120,13 @@ class SocketClientCloseTest {
         client.close();
 
         // the run loop must not close the socket a second time on its way out
-        verify(ep.socket(), timeout(2000)).close();
-        Thread.sleep(300);
+        verify(ep.socket(), timeout(AWAIT_MS)).close();
+        Thread.sleep(500);
         verify(ep.socket(), times(1)).close();
     }
 
     @Test
-    @Timeout(10)
+    @Timeout(20)
     void startAfterCloseLeavesNoSecondRunLoop() throws Exception {
         Endpoint ep = endpoint();
         SocketClient client =
@@ -146,15 +149,15 @@ class SocketClientCloseTest {
         doReturn(true).when(client).probeReachable(any(Duration.class));
         client.start();
 
-        verify(ep.provider(), timeout(2000)).get();
-        Thread.sleep(800);
+        verify(ep.provider(), timeout(AWAIT_MS)).get();
+        Thread.sleep(1000);
         verify(ep.provider(), times(1)).get();
 
         client.close();
     }
 
     @Test
-    @Timeout(10)
+    @Timeout(20)
     void publishRefusesConnectionTornDownByReadLoop() throws Exception {
         Endpoint ep = endpoint();
         // the first connection is the only one this client ever gets
@@ -169,7 +172,7 @@ class SocketClientCloseTest {
         awaitConnected(states);
 
         ep.in().signalEof(); // peer closed the connection
-        assertEquals(ConnectionState.DISCONNECTED, states.poll(2, SECONDS));
+        assertEquals(ConnectionState.DISCONNECTED, states.poll(AWAIT_MS, MILLISECONDS));
 
         assertThrows(TimeoutException.class, () -> client.publish(MESSAGE, Duration.ofMillis(300)));
         assertEquals(0, ep.out().size(), "must not write to a torn-down connection");

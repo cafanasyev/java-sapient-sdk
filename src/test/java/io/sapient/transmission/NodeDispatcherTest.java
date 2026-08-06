@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.*;
 
 import com.github.f4b6a3.ulid.Ulid;
@@ -86,6 +87,13 @@ class NodeDispatcherTest {
     }
 
     static final UUID FUSION_NODE_ID = UUID.randomUUID();
+
+    /**
+     * Upper bound for waiting on an asynchronous lifecycle event. Generous on purpose: these are
+     * waits, not deadlines under test, and a tight bound turns a loaded machine into a test
+     * failure.
+     */
+    static final long AWAIT_MS = 5000;
 
     static void sendRegistrationTask(Consumer<SapientMessage> onMessage, UUID nodeId) {
         onMessage.accept(
@@ -1421,9 +1429,11 @@ class NodeDispatcherTest {
     }
 
     @Test
-    @Timeout(5)
+    @Timeout(15)
     void reRegistrationAfterServerRetentionExpired() throws Exception {
-        // serverRetention = 3 × 50ms + 100ms = 250ms
+        // serverRetention = 0.95 × (3 × 50ms + 1s) ≈ 1.1s. Seconds rather than milliseconds:
+        // the window has to outlast a status report that is merely slow, or the node
+        // re-registers before the test has seen the loop start.
         UUID nodeId = UUID.randomUUID();
         AtomicBoolean online = new AtomicBoolean(true);
         IClient client = mock(IClient.class);
@@ -1436,7 +1446,7 @@ class NodeDispatcherTest {
                                         Duration.ofMillis(10),
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
-                                        Duration.ofMillis(100),
+                                        Duration.ofSeconds(1),
                                         Duration.ZERO,
                                         FUSION_NODE_ID,
                                         Duration.ZERO)));
@@ -1456,21 +1466,32 @@ class NodeDispatcherTest {
 
         dispatcher.register(node);
 
-        verify(dispatcher, timeout(1000))
+        verify(dispatcher, timeout(AWAIT_MS))
                 .publish(any(Registration.class), eq(nodeId), any(Duration.class));
         sendAck(onMessage, nodeId, true);
 
-        verify(dispatcher, timeout(1000).atLeast(1))
+        verify(dispatcher, timeout(AWAIT_MS).atLeast(1))
                 .publish(any(StatusReport.class), eq(nodeId), any(Duration.class));
 
         // simulate connection loss — all status report publishes now time out
         connectionLost.set(true);
 
         // after serverRetention (250ms) a second registration must be sent
-        verify(dispatcher, timeout(2000).atLeast(2))
+        verify(dispatcher, timeout(AWAIT_MS).atLeast(2))
                 .publish(any(Registration.class), eq(nodeId), any(Duration.class));
 
         dispatcher.close();
+    }
+
+    /** Waits for the dispatcher to bump its re-registration epoch above {@code before}. */
+    static void awaitEpochIncrement(NodeDispatcher dispatcher, long before)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofMillis(AWAIT_MS).toNanos();
+        while (System.nanoTime() < deadline) {
+            if (dispatcher.reregistrationEpoch() > before) return;
+            Thread.sleep(20);
+        }
+        fail("epoch should increment within " + AWAIT_MS + "ms");
     }
 
     @SuppressWarnings("unchecked")
@@ -1482,9 +1503,11 @@ class NodeDispatcherTest {
     }
 
     @Test
-    @Timeout(5)
+    @Timeout(15)
     void reRegistrationAfterReconnectExceedingGracePeriod() throws Exception {
-        // grace period = 100ms; disconnect gap = 150ms → must re-register
+        // grace period = 2s; disconnect gap = 3s → must re-register. The gap is simulated,
+        // so seconds cost no test time and keep the server retention window
+        // (0.95 × (3 × 50ms + 2s) ≈ 2s) far beyond any stalled status report.
         UUID nodeId = UUID.randomUUID();
         AtomicBoolean online = new AtomicBoolean(true);
         IClient client = mock(IClient.class);
@@ -1497,7 +1520,7 @@ class NodeDispatcherTest {
                                         Duration.ofMillis(10),
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
-                                        Duration.ofMillis(100),
+                                        Duration.ofSeconds(2),
                                         Duration.ZERO,
                                         FUSION_NODE_ID,
                                         Duration.ZERO)));
@@ -1506,25 +1529,25 @@ class NodeDispatcherTest {
 
         dispatcher.register(node);
 
-        verify(dispatcher, timeout(1000))
+        verify(dispatcher, timeout(AWAIT_MS))
                 .publish(any(Registration.class), eq(nodeId), any(Duration.class));
         sendAck(onMessage, nodeId, true);
-        verify(dispatcher, timeout(1000).atLeast(1))
+        verify(dispatcher, timeout(AWAIT_MS).atLeast(1))
                 .publish(any(StatusReport.class), eq(nodeId), any(Duration.class));
 
-        // simulate: disconnect then reconnect after 150ms (> 100ms grace period)
+        // simulate: disconnect then reconnect after 3s (> 2s grace period)
         Instant lost = Instant.now();
         stateListener.accept(ConnectionState.DISCONNECTED, lost);
-        stateListener.accept(ConnectionState.CONNECTED, lost.plusMillis(150));
+        stateListener.accept(ConnectionState.CONNECTED, lost.plusSeconds(3));
 
-        verify(dispatcher, timeout(1000).atLeast(2))
+        verify(dispatcher, timeout(AWAIT_MS).atLeast(2))
                 .publish(any(Registration.class), eq(nodeId), any(Duration.class));
 
         dispatcher.close();
     }
 
     @Test
-    @Timeout(5)
+    @Timeout(15)
     void reRegistrationAfterOutageInterruptedByFailedReconnectCycles() throws Exception {
         // Regression: SocketClient.runLoop emits DISCONNECTED on every failed reconnect
         // cycle (finally block runs each iteration). If the dispatcher overwrites
@@ -1544,7 +1567,7 @@ class NodeDispatcherTest {
                                         Duration.ofMillis(10),
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
-                                        Duration.ofMillis(100),
+                                        Duration.ofSeconds(2),
                                         Duration.ZERO,
                                         FUSION_NODE_ID,
                                         Duration.ZERO)));
@@ -1553,36 +1576,36 @@ class NodeDispatcherTest {
 
         dispatcher.register(node);
 
-        verify(dispatcher, timeout(1000))
+        verify(dispatcher, timeout(AWAIT_MS))
                 .publish(any(Registration.class), eq(nodeId), any(Duration.class));
         sendAck(onMessage, nodeId, true);
-        verify(dispatcher, timeout(1000).atLeast(1))
+        verify(dispatcher, timeout(AWAIT_MS).atLeast(1))
                 .publish(any(StatusReport.class), eq(nodeId), any(Duration.class));
 
         long epochBefore = dispatcher.reregistrationEpoch();
 
-        // Outage spans 200ms (> 100ms grace), broken up by two failed reconnect
+        // Outage spans 3s (> 2s grace), broken up by two failed reconnect
         // attempts, each of which emits DISCONNECTED again when the try-with-resources
         // unwinds. Intermediate DISCONNECTED/CONNECTING events must not bump the epoch —
         // only the final CONNECTED event (which crosses the grace period) may bump it.
         Instant lost = Instant.now();
         stateListener.accept(ConnectionState.DISCONNECTED, lost);
         assertEquals(epochBefore, dispatcher.reregistrationEpoch(), "DISCONNECTED must not bump");
-        stateListener.accept(ConnectionState.CONNECTING, lost.plusMillis(50));
+        stateListener.accept(ConnectionState.CONNECTING, lost.plusMillis(500));
         assertEquals(epochBefore, dispatcher.reregistrationEpoch(), "CONNECTING must not bump");
-        stateListener.accept(ConnectionState.DISCONNECTED, lost.plusMillis(60));
+        stateListener.accept(ConnectionState.DISCONNECTED, lost.plusMillis(600));
         assertEquals(
                 epochBefore,
                 dispatcher.reregistrationEpoch(),
                 "intermediate DISCONNECTED must not bump");
-        stateListener.accept(ConnectionState.CONNECTING, lost.plusMillis(150));
+        stateListener.accept(ConnectionState.CONNECTING, lost.plusMillis(1500));
         assertEquals(epochBefore, dispatcher.reregistrationEpoch(), "CONNECTING must not bump");
-        stateListener.accept(ConnectionState.DISCONNECTED, lost.plusMillis(160));
+        stateListener.accept(ConnectionState.DISCONNECTED, lost.plusMillis(1600));
         assertEquals(
                 epochBefore,
                 dispatcher.reregistrationEpoch(),
                 "intermediate DISCONNECTED must not bump");
-        stateListener.accept(ConnectionState.CONNECTED, lost.plusMillis(200));
+        stateListener.accept(ConnectionState.CONNECTED, lost.plusSeconds(3));
         assertEquals(
                 epochBefore + 1,
                 dispatcher.reregistrationEpoch(),
@@ -1592,9 +1615,13 @@ class NodeDispatcherTest {
     }
 
     @Test
-    @Timeout(5)
+    @Timeout(15)
     void noReRegistrationAfterReconnectWithinGracePeriod() throws Exception {
-        // grace period = 100ms; disconnect gap = 50ms → must NOT re-register
+        // grace period = 5s; disconnect gap = 50ms → must NOT re-register.
+        // The gap is simulated, so the grace period only has to be longer than it — picking
+        // seconds rather than milliseconds also puts the server retention window
+        // (0.95 × (3 × statusInterval + grace) ≈ 4.9s) far beyond the 500ms observed below,
+        // so a stalled status report cannot re-register the node for that other reason.
         UUID nodeId = UUID.randomUUID();
         AtomicBoolean online = new AtomicBoolean(true);
         IClient client = mock(IClient.class);
@@ -1607,7 +1634,7 @@ class NodeDispatcherTest {
                                         Duration.ofMillis(10),
                                         Duration.ofSeconds(5),
                                         Duration.ofSeconds(5),
-                                        Duration.ofMillis(100),
+                                        Duration.ofSeconds(5),
                                         Duration.ZERO,
                                         FUSION_NODE_ID,
                                         Duration.ZERO)));
@@ -1616,13 +1643,13 @@ class NodeDispatcherTest {
 
         dispatcher.register(node);
 
-        verify(dispatcher, timeout(1000))
+        verify(dispatcher, timeout(AWAIT_MS))
                 .publish(any(Registration.class), eq(nodeId), any(Duration.class));
         sendAck(onMessage, nodeId, true);
-        verify(dispatcher, timeout(1000).atLeast(1))
+        verify(dispatcher, timeout(AWAIT_MS).atLeast(1))
                 .publish(any(StatusReport.class), eq(nodeId), any(Duration.class));
 
-        // simulate: disconnect then reconnect after 50ms (< 100ms grace period)
+        // simulate: disconnect then reconnect after 50ms (< 5s grace period)
         Instant lost = Instant.now();
         stateListener.accept(ConnectionState.DISCONNECTED, lost);
         stateListener.accept(ConnectionState.CONNECTED, lost.plusMillis(50));
@@ -1643,8 +1670,12 @@ class NodeDispatcherTest {
         // thing that can detect the server is gone: next probe fails → watchdog closes the
         // socket → readLoop wakes → DISCONNECTED. On reconnect, connectionLossDetectionDelay
         // (150ms) added to the raw gap crosses the 100ms grace → epoch bumps → re-register.
+        // The 500ms status interval keeps the server retention window
+        // (0.95 × (3 × 500ms + 100ms − 150ms) ≈ 1.4s) well beyond the time the watchdog needs
+        // to notice the outage, so the reconnect is what re-registers the node here, not an
+        // expired retention window.
         UUID nodeId = UUID.randomUUID();
-        INode node = mockNode(nodeId, new AtomicBoolean(true), 50);
+        INode node = mockNode(nodeId, new AtomicBoolean(true), 500);
 
         ServerSocket server1 = new ServerSocket(0);
         AtomicInteger port = new AtomicInteger(server1.getLocalPort());
@@ -1689,7 +1720,9 @@ class NodeDispatcherTest {
 
             assertNotNull(
                     registrations.poll(5, TimeUnit.SECONDS), "re-registration after reconnect");
-            assertTrue(dispatcher.reregistrationEpoch() > epochBefore, "epoch should increment");
+            // the re-registration can reach the server just before the CONNECTED event is
+            // processed, so wait for the bump instead of sampling the epoch once
+            awaitEpochIncrement(dispatcher, epochBefore);
         }
     }
 
