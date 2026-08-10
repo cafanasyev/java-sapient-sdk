@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.*;
@@ -1023,6 +1024,35 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
+    void statusReportInfoNewAfterFailedPublish() throws Exception {
+        IClient client = mock(IClient.class);
+        doThrow(new TimeoutException("publish timeout"))
+                .doNothing()
+                .when(client)
+                .publish(any(SapientMessage.class), any(Duration.class));
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+        dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
+
+        // the first send fails, so the server never saw this content
+        StatusReport report = StatusReport.newBuilder().setMode("patrol").build();
+        assertThrows(
+                TimeoutException.class,
+                () -> dispatcher.publish(report, nodeId, Duration.ofSeconds(1)));
+        dispatcher.publish(report, nodeId, Duration.ofSeconds(1));
+
+        ArgumentCaptor<SapientMessage> captor = ArgumentCaptor.forClass(SapientMessage.class);
+        verify(client, times(2)).publish(captor.capture(), any(Duration.class));
+        assertEquals(
+                StatusReport.Info.INFO_NEW,
+                captor.getAllValues().get(1).getStatusReport().getInfo());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
     void explicitStatusReportInfoUnchangedIsKept() throws Exception {
         IClient client = mock(IClient.class);
         NodeDispatcher dispatcher =
@@ -1041,6 +1071,35 @@ class NodeDispatcherTest {
 
         SapientMessage msg = capturePublished(client);
         assertEquals(StatusReport.Info.INFO_UNCHANGED, msg.getStatusReport().getInfo());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void explicitStatusReportInfoUnchangedBecomesBaseline() throws Exception {
+        IClient client = mock(IClient.class);
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(
+                        client, NodeDispatcherConfig.defaults(FUSION_NODE_ID, Duration.ZERO));
+        UUID nodeId = UUID.randomUUID();
+        dispatcher.register(mockNode(nodeId, new AtomicBoolean(false), 200));
+
+        // the server received this content, so it is the baseline for the next comparison
+        dispatcher.publish(
+                StatusReport.newBuilder()
+                        .setMode("patrol")
+                        .setInfo(StatusReport.Info.INFO_UNCHANGED)
+                        .build(),
+                nodeId,
+                Duration.ofSeconds(1));
+        dispatcher.publish(
+                StatusReport.newBuilder().setMode("patrol").build(), nodeId, Duration.ofSeconds(1));
+
+        ArgumentCaptor<SapientMessage> captor = ArgumentCaptor.forClass(SapientMessage.class);
+        verify(client, times(2)).publish(captor.capture(), any(Duration.class));
+        assertEquals(
+                StatusReport.Info.INFO_UNCHANGED,
+                captor.getAllValues().get(1).getStatusReport().getInfo());
         dispatcher.close();
     }
 

@@ -30,7 +30,14 @@ class NodeWrapper implements AutoCloseable {
 
     @Getter @NonNull private final INode node;
     @Getter private final AtomicBoolean registered = new AtomicBoolean(false);
+
+    /**
+     * Last status report that reached the transport without an error. The INFO_UNCHANGED
+     * de-duplication compares against it, so it must hold only content the server really received.
+     * A failed send keeps the old value. See CHANGELOG.md §12.
+     */
     @Getter private final AtomicReference<StatusReport> lastStatusReport = new AtomicReference<>();
+
     @Getter private final BlockingQueue<RegistrationAck> ackQueue = new ArrayBlockingQueue<>(1);
 
     private final NodeDispatcher dispatcher;

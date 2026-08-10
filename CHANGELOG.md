@@ -461,3 +461,55 @@ A goodbye report had the same gap. It is sent from `NodeWrapper.close()` on top 
 Every published `StatusReport` carries a valid `info`, so nodes no longer have to set the field
 themselves to stay protocol-compliant. De-duplication now works for those nodes as well: identical
 reports go out as `INFO_UNCHANGED`, and a goodbye always goes out as `INFO_NEW`.
+
+## 12 — Update lastStatusReport only after successful send
+
+### Problem
+
+`NodeDispatcher.publish(StatusReport, ...)` stored the report in `NodeWrapper.lastStatusReport` with
+`getAndSet` **before** giving the message to the transport. The store happened even when the send
+then failed. So `lastStatusReport` could hold content the server never received.
+
+That silently lost a state change:
+
+1. The node state changes. The report goes out as `INFO_NEW`.
+2. `IClient.publish` throws — publish deadline reached, or the client was stopped. Nothing reached
+   the server. `NodeWrapper.runStatusLoop` logs the timeout and keeps running.
+3. On the next tick the same content is published again. It equals `lastStatusReport`, so it goes out
+   as `INFO_UNCHANGED`.
+
+The server keeps the old state, and then gets "nothing changed" for a state it never received. The
+change stays invisible until the node content changes again.
+
+The python SDK (py-sapient-sdk) already has this check: a failed write keeps the previous report.
+
+### Decision
+
+- **Read `lastStatusReport`, send, then update it.** The update runs after `IClient.publish` returned
+  without an error. When the send throws, the exception leaves the method and the old value stays on
+  its own — no `try/catch` and no rollback needed.
+
+- **`compareAndSet` instead of `set`.** The read and the write are two steps now, so a concurrent
+  publish of the same node can land between them. The later writer loses instead of overwriting a
+  newer value.
+
+- **Every sent report is stored, with no exceptions.** A report the node pinned to `INFO_UNCHANGED`
+  also reached the server, so it is stored too — otherwise a change could be lost across a pinned
+  report. A goodbye is stored as well. It is harmless: `system` takes part in the content comparison,
+  so a stored goodbye never matches a normal report, and a goodbye itself is always `INFO_NEW`
+  without any comparison (§11).
+
+- **A failed send is treated as "not delivered".** `SocketClient.publish` retries on `IOException`
+  with a fresh connection. It throws only on the publish deadline or on a stopped client. So a clean
+  return means the bytes were written and flushed, but it is no proof that the server processed them.
+  When it is not clear, the SDK assumes the report did not arrive. One case is then one extra
+  `INFO_NEW` with the same content: the server sees the same state twice and nothing breaks. The
+  other case is worse — the SDK would send `INFO_UNCHANGED`, and the server would never learn the
+  new state.
+
+### Result
+
+`lastStatusReport` holds only content that reached the transport without an error. A failed status
+report is sent again as `INFO_NEW` on the next tick, so the server always learns about the change.
+Two tests cover it: a failed publish keeps the next identical report `INFO_NEW`, and a report pinned
+to `INFO_UNCHANGED` is stored for the next comparison.

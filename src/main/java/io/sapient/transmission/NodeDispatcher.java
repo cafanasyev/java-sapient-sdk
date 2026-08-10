@@ -323,26 +323,38 @@ public class NodeDispatcher implements INodeDispatcher {
         if (status.getReportId().isBlank()) {
             status = status.toBuilder().setReportId(newReportId()).build();
         }
-        status = withInfo(status, findNode(nodeId));
-        return publish(SapientMessage.newBuilder().setStatusReport(status), nodeId, timeout);
+        NodeWrapper node = findNode(nodeId);
+        StatusReport prev = node == null ? null : node.getLastStatusReport().get();
+        status = withInfo(status, prev);
+        SapientMessage message =
+                publish(SapientMessage.newBuilder().setStatusReport(status), nodeId, timeout);
+        if (node != null) {
+            // store only after the send returned without error. A failed send must keep the old
+            // value, or the next identical report goes out as INFO_UNCHANGED for content the server
+            // never received. compareAndSet loses to a concurrent publish of the same node instead
+            // of overwriting its newer value. See CHANGELOG.md §12.
+            node.getLastStatusReport().compareAndSet(prev, status);
+        }
+        return message;
     }
 
     /**
      * Fills the mandatory {@code info} field of a status report. A goodbye always reports new
      * information, so it is set to INFO_NEW and never de-duplicated. For any other report the value
-     * is INFO_UNCHANGED when the content repeats the previous report of the same node, and INFO_NEW
-     * otherwise. An explicit INFO_UNCHANGED from the caller is kept as sent.
+     * is INFO_UNCHANGED when the content repeats {@code prev} and INFO_NEW otherwise. An explicit
+     * INFO_UNCHANGED from the caller is kept as sent.
      *
      * <p>A node that leaves {@code info} unset gets a valid value instead of INFO_UNSPECIFIED.
+     *
+     * @param prev last status report the node sent successfully, or {@code null} when there is none
+     *     — a fresh node, or an unknown (not registered) node. Then there is nothing to compare
+     *     with, so the content is new.
      */
-    private static StatusReport withInfo(StatusReport status, NodeWrapper node) {
+    private static StatusReport withInfo(StatusReport status, StatusReport prev) {
         if (status.getSystem() == StatusReport.System.SYSTEM_GOODBYE) {
             return withInfo(status, StatusReport.Info.INFO_NEW);
         }
         if (status.getInfo() == StatusReport.Info.INFO_UNCHANGED) return status;
-        // unknown node: no previous report to compare with, so the content is new
-        if (node == null) return withInfo(status, StatusReport.Info.INFO_NEW);
-        StatusReport prev = node.getLastStatusReport().getAndSet(status);
         boolean unchanged = prev != null && contentEquals(prev, status);
         return withInfo(
                 status, unchanged ? StatusReport.Info.INFO_UNCHANGED : StatusReport.Info.INFO_NEW);
