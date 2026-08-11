@@ -513,3 +513,46 @@ The python SDK (py-sapient-sdk) already has this check: a failed write keeps the
 report is sent again as `INFO_NEW` on the next tick, so the server always learns about the change.
 Two tests cover it: a failed publish keeps the next identical report `INFO_NEW`, and a report pinned
 to `INFO_UNCHANGED` is stored for the next comparison.
+
+
+## 13 — Cap the message frame size
+
+### Problem
+
+`SocketClient.readLoop` allocated `new byte[len]` with `len` taken straight from the 4-byte
+length prefix on the wire. Nothing checked the value.
+
+The prefix is unsigned on the wire and signed in Java. A prefix of `0xFFFFFFFF` reads back as
+`-1`, so `new byte[-1]` threw `NegativeArraySizeException`. A large positive prefix threw
+`OutOfMemoryError` instead.
+
+Both are unchecked. `runLoop` catches only `EOFException` and `IOException`, so the exception
+escaped the loop and killed the virtual thread. After that the client was dead for good:
+`running` stayed `true` and `runLoopThread` stayed non-null, so `start()` refused to build a
+replacement loop. Nothing in the log said why.
+
+This is not only a hostile-input problem. `0xFFFFFFFF` is the pong sentinel of keepalive
+solution D, so a peer using that mode would crash the client on its first pong.
+
+### Decision
+
+- **Cap the body at 16 MiB** (`DEFAULT_MAX_FRAME_SIZE`), the same value the SAPIENT server uses.
+  The check widens the prefix with `Integer.toUnsignedLong` before comparing, so `0xFFFFFFFF` is
+  seen as 4294967295 and not as a small negative number. A frame above the cap raises
+  `IOException`, which `runLoop` already handles: the connection is dropped and retried.
+
+- **Let the caller change the cap.** A new `SocketClient` constructor takes `maxFrameSize`, next
+  to the existing timeouts. A deployment that knows its peer sends bigger or smaller messages
+  can set its own value; everything else keeps the 16 MiB default. A non-positive value is
+  rejected in the constructor, so the client cannot be built with a cap that blocks every frame.
+
+- **Catch `RuntimeException` in `runLoop` as well.** The cap fixes the one trigger we know
+  about, not the shape of the failure. Any unchecked exception from the read path is now
+  treated like a connection failure — log it, drop the connection, reconnect — instead of
+  killing the client silently.
+
+### Result
+
+A garbage or hostile length prefix costs one reconnect instead of a permanently dead client.
+A zero-length prefix still produces an empty `SapientMessage`, so nothing changes for a
+well-behaved peer.

@@ -6,24 +6,17 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.*;
 
-import com.google.protobuf.InvalidProtocolBufferException;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.PipedInputStream;
-import java.io.PipedOutputStream;
 import java.net.Socket;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.time.Duration;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
-import org.mockito.stubbing.Answer;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 
@@ -109,50 +102,5 @@ class SocketClientReconnectTest {
         when(socket.getOutputStream()).thenReturn(new ByteArrayOutputStream());
         when(socket.isConnected()).thenReturn(true);
         return socket;
-    }
-
-    private static class MockPipe {
-        private final PipedOutputStream serverOut = new PipedOutputStream();
-        private final PipedInputStream clientIn = new PipedInputStream(serverOut);
-        private final ByteArrayOutputStream clientOut = new ByteArrayOutputStream();
-        private final AtomicBoolean connected = new AtomicBoolean(true);
-
-        MockPipe() throws IOException {}
-
-        Socket socket() throws IOException {
-            Socket socket = mock(Socket.class);
-            when(socket.getInputStream()).thenReturn(clientIn);
-            when(socket.getOutputStream()).thenReturn(clientOut);
-            when(socket.isConnected()).thenAnswer(inv -> connected.get());
-            Answer<Void> closeAnswer =
-                    inv -> {
-                        connected.set(false);
-                        serverOut.close();
-                        return null;
-                    };
-            doAnswer(closeAnswer).when(socket).close();
-            return socket;
-        }
-
-        void send(SapientMessage msg) throws IOException {
-            byte[] data = msg.toByteArray();
-            serverOut.write(
-                    ByteBuffer.allocate(4 + data.length)
-                            .order(ByteOrder.LITTLE_ENDIAN)
-                            .putInt(data.length)
-                            .put(data)
-                            .array());
-            serverOut.flush();
-        }
-
-        void serverClose() throws IOException {
-            serverOut.close();
-        }
-
-        SapientMessage captured() throws InvalidProtocolBufferException {
-            byte[] bytes = clientOut.toByteArray();
-            int len = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).getInt();
-            return SapientMessage.parseFrom(java.util.Arrays.copyOfRange(bytes, 4, 4 + len));
-        }
     }
 }

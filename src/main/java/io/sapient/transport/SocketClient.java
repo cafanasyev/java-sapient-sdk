@@ -87,10 +87,17 @@ public class SocketClient implements IClient {
     /** How long {@link #close()} waits for the run loop to finish before giving up on it. */
     private static final Duration RUN_LOOP_STOP_TIMEOUT = Duration.ofSeconds(5);
 
+    /**
+     * Largest message body we will allocate for by default, in bytes. A garbage or hostile length
+     * prefix cannot make the client allocate more than this. Same value as the SAPIENT server uses.
+     */
+    static final int DEFAULT_MAX_FRAME_SIZE = 16 << 20;
+
     private final ISocketProvider socketProvider;
     private final Duration probeTimeout;
     private final Duration initialReconnectDelay;
     private final Duration watchdogInterval;
+    private final int maxFrameSize;
 
     /**
      * Creates a client that obtains connections from the given provider.
@@ -122,10 +129,42 @@ public class SocketClient implements IClient {
             @NonNull Duration probeTimeout,
             @NonNull Duration initialReconnectDelay,
             @NonNull Duration watchdogInterval) {
+        this(
+                socketProvider,
+                probeTimeout,
+                initialReconnectDelay,
+                watchdogInterval,
+                DEFAULT_MAX_FRAME_SIZE);
+    }
+
+    /**
+     * Creates a client with configurable timeouts and frame size limit.
+     *
+     * @param socketProvider supplies new socket connections and describes the remote address
+     * @param probeTimeout timeout for reachability probes (applies to both watchdog probes and the
+     *     public {@link #probeReachable(Duration)} call)
+     * @param initialReconnectDelay base delay for the first reconnect attempt; scaled linearly by
+     *     attempt count (capped at 10x)
+     * @param watchdogInterval how often the watchdog runs a reachability probe while the connection
+     *     is established. Detection of a silently-dead peer is bounded by {@code watchdogInterval +
+     *     probeTimeout}
+     * @param maxFrameSize largest message body accepted, in bytes. A length prefix above this drops
+     *     the connection instead of allocating for it. Must be positive
+     */
+    public SocketClient(
+            @NonNull ISocketProvider socketProvider,
+            @NonNull Duration probeTimeout,
+            @NonNull Duration initialReconnectDelay,
+            @NonNull Duration watchdogInterval,
+            int maxFrameSize) {
+        if (maxFrameSize <= 0) {
+            throw new IllegalArgumentException("maxFrameSize must be positive: " + maxFrameSize);
+        }
         this.socketProvider = socketProvider;
         this.probeTimeout = probeTimeout;
         this.initialReconnectDelay = initialReconnectDelay;
         this.watchdogInterval = watchdogInterval;
+        this.maxFrameSize = maxFrameSize;
     }
 
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -189,6 +228,14 @@ public class SocketClient implements IClient {
             } catch (IOException e) {
                 if (running.get()) {
                     log.error("server connection failure", e);
+                }
+            } catch (RuntimeException e) {
+                // an unchecked exception here would otherwise escape runLoop and kill the
+                // virtual thread. running stays true and runLoopThread stays non-null, so
+                // start() refuses to build a replacement and the client is dead for good.
+                // Treat it like any other connection failure: drop it and reconnect.
+                if (running.get()) {
+                    log.error("unexpected failure on the connection", e);
                 }
             } finally {
                 if (watchdog != null) {
@@ -416,6 +463,7 @@ public class SocketClient implements IClient {
         while (running.get()) {
             readFully(connection.in, lenBuf, 4);
             int len = ByteBuffer.wrap(lenBuf).order(ByteOrder.LITTLE_ENDIAN).getInt();
+            checkFrameSize(len, maxFrameSize);
             byte[] msgBuf = new byte[len];
             readFully(connection.in, msgBuf, len);
 
@@ -467,6 +515,24 @@ public class SocketClient implements IClient {
                 throw new EOFException("connection to the server lost");
             }
             total += n;
+        }
+    }
+
+    /**
+     * Rejects a length prefix that no real SAPIENT message can have. The prefix is unsigned on the
+     * wire but signed in Java, so it is widened before the comparison — without that, {@code
+     * 0xFFFFFFFF} reads as -1, passes any {@code > MAX} test, and then blows up in {@code new
+     * byte[len]} with an unchecked NegativeArraySizeException.
+     *
+     * @param len length prefix as read from the wire
+     * @param maxFrameSize largest body accepted, in bytes
+     * @throws IOException if the body would be larger than {@code maxFrameSize}
+     */
+    static void checkFrameSize(int len, int maxFrameSize) throws IOException {
+        long size = Integer.toUnsignedLong(len);
+        if (size > maxFrameSize) {
+            throw new IOException(
+                    "frame too large: " + size + " bytes, max " + maxFrameSize + " bytes");
         }
     }
 }
