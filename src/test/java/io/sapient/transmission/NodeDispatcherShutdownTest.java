@@ -44,9 +44,15 @@ class NodeDispatcherShutdownTest {
                 Duration.ofSeconds(5),
                 Duration.ofSeconds(5),
                 Duration.ofMinutes(2),
-                Duration.ZERO,
                 FUSION_NODE_ID,
                 Duration.ZERO);
+    }
+
+    /** A mocked client that reports no detection delay. These tests drive the timing themselves. */
+    static IClient mockClient() {
+        IClient client = mock(IClient.class);
+        when(client.connectionLossDetectionDelay()).thenReturn(Duration.ZERO);
+        return client;
     }
 
     /** Waits for the latch, restoring the interrupt flag afterwards instead of bailing out. */
@@ -92,7 +98,7 @@ class NodeDispatcherShutdownTest {
         UUID nodeId2 = UUID.randomUUID();
         AtomicBoolean online1 = new AtomicBoolean(true);
         AtomicBoolean online2 = new AtomicBoolean(true);
-        IClient client = mock(IClient.class);
+        IClient client = mockClient();
         NodeDispatcher dispatcher = new NodeDispatcher(client, config());
         Consumer<SapientMessage> onMessage = captureSubscription(client);
 
@@ -118,7 +124,7 @@ class NodeDispatcherShutdownTest {
     @Timeout(20)
     void unregisterClosesClientWhenLastOnlineNodeRemoved() throws Exception {
         UUID nodeId = UUID.randomUUID();
-        IClient client = mock(IClient.class);
+        IClient client = mockClient();
         INode node = mockNode(nodeId, new AtomicBoolean(true), 50);
         NodeDispatcher dispatcher = new NodeDispatcher(client, config());
         Consumer<SapientMessage> onMessage = captureSubscription(client);
@@ -141,7 +147,7 @@ class NodeDispatcherShutdownTest {
     @Timeout(25)
     void nodeDoesNotPublishAfterClientClosed() throws Exception {
         UUID nodeId = UUID.randomUUID();
-        IClient client = mock(IClient.class);
+        IClient client = mockClient();
         AtomicBoolean clientClosed = new AtomicBoolean(false);
         AtomicBoolean publishedAfterClose = new AtomicBoolean(false);
 

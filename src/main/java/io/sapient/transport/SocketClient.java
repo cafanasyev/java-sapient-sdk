@@ -1,6 +1,14 @@
 package io.sapient.transport;
 
 import com.google.protobuf.InvalidProtocolBufferException;
+import io.sapient.transport.health.HealthCheckConfig;
+import io.sapient.transport.health.HealthCheckType;
+import io.sapient.transport.health.HealthMonitor;
+import io.sapient.transport.health.IHealthCheck;
+import io.sapient.transport.health.IcmpHealthCheck;
+import io.sapient.transport.health.InBandHealthCheck;
+import io.sapient.transport.health.KeepalivePrefixes;
+import io.sapient.transport.health.NetcatHealthCheck;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -80,9 +88,7 @@ public class SocketClient implements IClient {
         }
     }
 
-    private static final Duration DEFAULT_PROBE_TIMEOUT = Duration.ofSeconds(2);
     private static final Duration DEFAULT_INITIAL_RECONNECT_DELAY = Duration.ofSeconds(1);
-    private static final Duration DEFAULT_WATCHDOG_INTERVAL = Duration.ofSeconds(10);
 
     /** How long {@link #close()} waits for the run loop to finish before giving up on it. */
     private static final Duration RUN_LOOP_STOP_TIMEOUT = Duration.ofSeconds(5);
@@ -94,77 +100,70 @@ public class SocketClient implements IClient {
     static final int DEFAULT_MAX_FRAME_SIZE = 16 << 20;
 
     private final ISocketProvider socketProvider;
-    private final Duration probeTimeout;
+    private final HealthCheckConfig healthCheckConfig;
     private final Duration initialReconnectDelay;
-    private final Duration watchdogInterval;
     private final int maxFrameSize;
 
+    /** Null when the health check puts nothing on the wire, which is the NETCAT and ICMP case. */
+    private final KeepalivePrefixes prefixes;
+
     /**
-     * Creates a client that obtains connections from the given provider.
+     * Creates a client with the default health check: a TCP connect probe every 10 seconds, a 2
+     * second probe timeout, and 3 failures in a row before the connection is dropped.
      *
      * @param socketProvider supplies new socket connections and describes the remote address
      */
     public SocketClient(@NonNull ISocketProvider socketProvider) {
-        this(
-                socketProvider,
-                DEFAULT_PROBE_TIMEOUT,
-                DEFAULT_INITIAL_RECONNECT_DELAY,
-                DEFAULT_WATCHDOG_INTERVAL);
+        this(socketProvider, HealthCheckConfig.DEFAULT, DEFAULT_INITIAL_RECONNECT_DELAY);
     }
 
     /**
-     * Creates a client with configurable timeouts.
+     * Creates a client with an explicit health check.
      *
      * @param socketProvider supplies new socket connections and describes the remote address
-     * @param probeTimeout timeout for reachability probes (applies to both watchdog probes and the
-     *     public {@link #probeReachable(Duration)} call)
+     * @param healthCheckConfig which liveness check to run, how often, and how many failures in a
+     *     row end the connection
      * @param initialReconnectDelay base delay for the first reconnect attempt; scaled linearly by
      *     attempt count (capped at 10x)
-     * @param watchdogInterval how often the watchdog runs a reachability probe while the connection
-     *     is established. Detection of a silently-dead peer is bounded by {@code watchdogInterval +
-     *     probeTimeout}
+     * @throws IllegalArgumentException if the health check type cannot run over a raw socket
      */
     public SocketClient(
             @NonNull ISocketProvider socketProvider,
-            @NonNull Duration probeTimeout,
-            @NonNull Duration initialReconnectDelay,
-            @NonNull Duration watchdogInterval) {
-        this(
-                socketProvider,
-                probeTimeout,
-                initialReconnectDelay,
-                watchdogInterval,
-                DEFAULT_MAX_FRAME_SIZE);
+            @NonNull HealthCheckConfig healthCheckConfig,
+            @NonNull Duration initialReconnectDelay) {
+        this(socketProvider, healthCheckConfig, initialReconnectDelay, DEFAULT_MAX_FRAME_SIZE);
     }
 
     /**
-     * Creates a client with configurable timeouts and frame size limit.
+     * Creates a client with a configurable health check and frame size limit.
      *
      * @param socketProvider supplies new socket connections and describes the remote address
-     * @param probeTimeout timeout for reachability probes (applies to both watchdog probes and the
-     *     public {@link #probeReachable(Duration)} call)
+     * @param healthCheckConfig how the connection is checked for liveness
      * @param initialReconnectDelay base delay for the first reconnect attempt; scaled linearly by
      *     attempt count (capped at 10x)
-     * @param watchdogInterval how often the watchdog runs a reachability probe while the connection
-     *     is established. Detection of a silently-dead peer is bounded by {@code watchdogInterval +
-     *     probeTimeout}
      * @param maxFrameSize largest message body accepted, in bytes. A length prefix above this drops
      *     the connection instead of allocating for it. Must be positive
+     * @throws IllegalArgumentException if the health check type cannot run over a raw socket, or if
+     *     {@code maxFrameSize} is not positive
      */
     public SocketClient(
             @NonNull ISocketProvider socketProvider,
-            @NonNull Duration probeTimeout,
+            @NonNull HealthCheckConfig healthCheckConfig,
             @NonNull Duration initialReconnectDelay,
-            @NonNull Duration watchdogInterval,
             int maxFrameSize) {
+        if (healthCheckConfig.type() == HealthCheckType.TRANSPORT_NATIVE) {
+            throw new IllegalArgumentException(
+                    "SocketClient does not support TRANSPORT_NATIVE: a raw socket has no built-in"
+                            + " keepalive");
+        }
         if (maxFrameSize <= 0) {
             throw new IllegalArgumentException("maxFrameSize must be positive: " + maxFrameSize);
         }
         this.socketProvider = socketProvider;
-        this.probeTimeout = probeTimeout;
+        this.healthCheckConfig = healthCheckConfig;
         this.initialReconnectDelay = initialReconnectDelay;
-        this.watchdogInterval = watchdogInterval;
         this.maxFrameSize = maxFrameSize;
+        this.prefixes = KeepalivePrefixes.of(healthCheckConfig.type());
     }
 
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -205,7 +204,11 @@ public class SocketClient implements IClient {
             // listeners to chew on, which also means the dispatcher records the
             // outage start at the moment the connection actually died rather than
             // at the latest failed retry.
-            if (!probeReachable(probeTimeout)) {
+            // a plain TCP probe before every connect attempt, whatever the health check type
+            // is: we are about to open a TCP connection anyway, so this is always the right
+            // question to ask. Staying silent when it fails keeps CONNECTING → DISCONNECTED
+            // churn out of the listeners.
+            if (!probeReachable(healthCheckConfig.timeout())) {
                 sleepBeforeReconnect(++reconnectAttempts);
                 continue;
             }
@@ -213,14 +216,17 @@ public class SocketClient implements IClient {
             log.info("initializing new server connection");
             setState(ConnectionState.CONNECTING);
 
-            Thread watchdog = null;
+            Thread monitorThread = null;
             Connection conn = null;
             try {
                 conn = connect();
                 reconnectAttempts = 0;
                 setState(ConnectionState.CONNECTED);
-                watchdog = startWatchdog(conn);
-                readLoop(conn);
+                // one monitor per connection; closing the socket is how it reports a dead link
+                HealthMonitor monitor =
+                        new HealthMonitor(newHealthCheck(), healthCheckConfig, conn::close);
+                monitorThread = Thread.startVirtualThread(monitor);
+                readLoop(conn, monitor);
             } catch (EOFException e) {
                 if (running.get()) {
                     log.info("server closed the connection");
@@ -238,8 +244,8 @@ public class SocketClient implements IClient {
                     log.error("unexpected failure on the connection", e);
                 }
             } finally {
-                if (watchdog != null) {
-                    watchdog.interrupt();
+                if (monitorThread != null) {
+                    monitorThread.interrupt();
                 }
                 if (conn != null) {
                     // take the connection out of the slot before closing it, or a publisher
@@ -396,6 +402,11 @@ public class SocketClient implements IClient {
     }
 
     @Override
+    public Duration connectionLossDetectionDelay() {
+        return healthCheckConfig.connectionLossDetectionDelay();
+    }
+
+    @Override
     public void addStateChangeListener(BiConsumer<ConnectionState, Instant> listener) {
         listenersLock.writeLock().lock();
         try {
@@ -457,15 +468,26 @@ public class SocketClient implements IClient {
         return newConnection;
     }
 
-    private void readLoop(Connection connection) throws IOException {
+    private void readLoop(Connection connection, HealthMonitor monitor) throws IOException {
         byte[] lenBuf = new byte[4];
 
         while (running.get()) {
             readFully(connection.in, lenBuf, 4);
             int len = ByteBuffer.wrap(lenBuf).order(ByteOrder.LITTLE_ENDIAN).getInt();
+
+            // a keepalive frame has no body, so it can never become a SapientMessage.
+            // We consume it and never answer it — the client only ever initiates.
+            if (prefixes != null && (len == prefixes.ping() || len == prefixes.pong())) {
+                monitor.onInbound();
+                continue;
+            }
+
             checkFrameSize(len, maxFrameSize);
             byte[] msgBuf = new byte[len];
             readFully(connection.in, msgBuf, len);
+
+            // any frame from the peer proves the pipe is alive, not only a pong
+            monitor.onInbound();
 
             Consumer<SapientMessage> cons = consumer.get();
             if (cons != null) {
@@ -479,32 +501,55 @@ public class SocketClient implements IClient {
     }
 
     /**
-     * Watches the connection by periodically running a reachability probe independently of the read
-     * path. On failure the watchdog closes the socket, which unblocks {@link #readLoop} (via {@code
-     * IOException}) and drives the {@link ConnectionState#DISCONNECTED} transition in {@link
-     * #runLoop}. This removes any reliance on {@code SO_TIMEOUT} firing promptly in {@link
-     * java.io.InputStream#read()}, which is not reliable on SSL sockets or when data trickles in
-     * slowly.
+     * Builds the health check for one connection. The monitor that drives it closes the socket
+     * after enough failed checks in a row, which unblocks the pending {@code InputStream.read()}
+     * and drives the {@link ConnectionState#DISCONNECTED} transition through the existing path in
+     * {@link #runLoop}. Detection does not depend on {@code SO_TIMEOUT}, which is not reliable on
+     * TLS sockets or when bytes trickle in.
      */
-    private Thread startWatchdog(Connection conn) {
-        return Thread.startVirtualThread(
-                () -> {
-                    while (running.get() && !Thread.currentThread().isInterrupted()) {
-                        try {
-                            Thread.sleep(watchdogInterval);
-                        } catch (InterruptedException e) {
-                            return;
-                        }
-                        if (!running.get() || Thread.currentThread().isInterrupted()) {
-                            return;
-                        }
-                        if (!probeReachable(probeTimeout)) {
-                            log.warn("watchdog probe failed, closing connection");
-                            conn.close();
-                            return;
-                        }
-                    }
-                });
+    private IHealthCheck newHealthCheck() {
+        Duration timeout = healthCheckConfig.timeout();
+        return switch (healthCheckConfig.type()) {
+            case NETCAT ->
+                    new NetcatHealthCheck(socketProvider.host(), socketProvider.port(), timeout);
+            case ICMP -> new IcmpHealthCheck(socketProvider.host(), timeout);
+            case ECHO, PINGPONG ->
+                    new InBandHealthCheck(prefixes.ping(), timeout, this::writePrefix);
+            case TRANSPORT_NATIVE -> throw new IllegalStateException("rejected in the constructor");
+        };
+    }
+
+    /**
+     * Writes a bare 4-byte prefix on the live connection for the in-band health check.
+     *
+     * <p>It queues on {@code connectionSlot} like any publisher, so a write already in progress is
+     * never interrupted. Returning {@code false} when the slot cannot be taken in time is what
+     * turns a blocked write path into a failed check.
+     */
+    private boolean writePrefix(int prefix, Duration timeout) {
+        Connection conn;
+        try {
+            conn = connectionSlot.poll(timeout.toNanos(), TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        if (conn == null || !conn.isUsable()) {
+            return false;
+        }
+        try {
+            conn.out.write(
+                    ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(prefix).array());
+            conn.out.flush();
+            if (conn.isUsable() && !connectionSlot.offer(conn)) {
+                log.error("failed to return connection to slot");
+            }
+            return true;
+        } catch (IOException e) {
+            log.error("failed to write keepalive prefix", e);
+            // don't put back — the slot stays empty until reconnect re-offers, same as publish
+            return false;
+        }
     }
 
     private void readFully(InputStream in, byte[] buf, int count) throws IOException {

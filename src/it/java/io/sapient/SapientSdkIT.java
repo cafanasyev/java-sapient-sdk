@@ -47,7 +47,7 @@ class SapientSdkIT {
         dispatcher =
                 new NodeDispatcher(
                         client,
-                        NodeDispatcherConfig.defaults(UUID.randomUUID(), Duration.ofSeconds(12)));
+                        NodeDispatcherConfig.defaults(UUID.randomUUID()));
     }
 
     @AfterAll

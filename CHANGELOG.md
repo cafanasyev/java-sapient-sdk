@@ -556,3 +556,79 @@ solution D, so a peer using that mode would crash the client on its first pong.
 A garbage or hostile length prefix costs one reconnect instead of a permanently dead client.
 A zero-length prefix still produces an empty `SapientMessage`, so nothing changes for a
 well-behaved peer.
+
+## 14 — Four health check types and a configurable failure count
+
+### Problem
+
+The client had one way to check the connection and no tolerance for a single failure.
+
+`SocketClient` ran a watchdog that opened a throwaway TCP connection to `host:port`. There was
+no way to use ICMP where it is allowed, and no way to use the keepalive the SAPIENT server
+implements ([dstl/SAPIENT-Proto-Files#12](https://github.com/dstl/SAPIENT-Proto-Files/issues/12)
+solutions C and D).
+
+The watchdog closed the socket on the **first** failed probe. One dropped packet or one busy
+accept queue cost a full reconnect, and past the grace period a re-registration.
+
+`NodeDispatcherConfig.connectionLossDetectionDelay` had to equal the client's `watchdogInterval
++ probeTimeout`, computed by the caller. Nothing checked it, and a wrong value breaks both
+re-registration checks from §3 and §4.
+
+### Decision
+
+- **One health check type per client**, chosen with `HealthCheckConfig`: `NETCAT` (TCP connect,
+  the old behaviour), `ICMP`, `ECHO` (solution C) and `PINGPONG` (solution D).
+  `TRANSPORT_NATIVE` is reserved for a future gRPC client and rejected by `SocketClient`.
+
+- **Fixed cadence, consecutive-failure count.** Checks start every `interval` whether the
+  previous one passed or failed, and the next check is anchored on the previous check's start.
+  Anchoring on the end would make failed checks retry back to back, so N failures would measure
+  one outage of `N × timeout` instead of tolerating a blip. `timeout <= interval` is enforced,
+  so two checks never overlap and the detection delay stays one line:
+  `failureThreshold × interval + timeout`. This is what SSH, BGP, OSPF, BFD, Kubernetes and gRPC
+  keepalive all do.
+
+- **The transport reports its own detection delay.** `IClient.connectionLossDetectionDelay()`
+  replaces the `NodeDispatcherConfig` field. A failure count cannot carry across transports —
+  gRPC closes on the first missed PING ACK and has no counter — but a duration can. The
+  dispatcher reads one number and never learns which mechanism produced it.
+
+- **Any inbound frame proves liveness.** The read path tells the monitor about every frame, which
+  pushes the next check back by a full interval and answers a pending in-band ping. A pong is
+  only one kind of proof; a `RegistrationAck` works as well. This also makes a wrong-mode setup
+  harmless: a server with keepalive off answers a zero-length frame with a validation `Error`,
+  and that `Error` passes the check.
+
+- **The in-band check queues for the write path like a publisher.** It never interrupts a write
+  in progress. Failing to take the write slot within `timeout` counts as a failed check — a
+  write path blocked that long is not a healthy connection, and it is the one case a priority
+  queue could not fix anyway, since a publisher stuck inside `write()` blocks any single writer
+  too. Known cost: a congested link can fail a check, which is what the failure threshold
+  absorbs.
+
+- **ICMP spawns the system `ping`.** `InetAddress.isReachable` falls back to a TCP connection on
+  port 7 when it cannot get the ICMP privilege, so unprivileged on Linux it calls a healthy host
+  dead. The `ping` binary carries `cap_net_raw` or the setuid bit and works without root, and the
+  Python SDK can do exactly the same.
+
+- **Clamp the retention window at zero.** `3 × statusInterval + grace − detectionDelay` can go
+  negative with a large interval or threshold. A negative window means "re-register on every
+  tick", so it is clamped and logged.
+
+### Result
+
+Four interchangeable liveness checks behind one config record. A single failed check no longer
+costs a reconnect. The detection delay cannot drift out of sync with the transport, because the
+transport is what reports it.
+
+Defaults keep today's mechanism with the standard failure count: `NETCAT`, 10s interval, 2s
+timeout, threshold 3. Detection moves from 12s to 32s — the price of tolerating two lost probes
+instead of zero, absorbed by the retention budget. To get the old speed back, lower the interval
+rather than the threshold: `4s / 2s / 3` detects in 14s and still tolerates two lost probes.
+
+**Breaking:** `NodeDispatcherConfig` lost its `connectionLossDetectionDelay` component and
+`defaults(destinationId, delay)` became `defaults(destinationId)`. The four-argument
+`SocketClient(provider, probeTimeout, initialReconnectDelay, watchdogInterval)` constructor
+became `SocketClient(provider, HealthCheckConfig, initialReconnectDelay)`. The one-argument
+`SocketClient(provider)` is unchanged.

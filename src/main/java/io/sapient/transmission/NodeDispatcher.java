@@ -96,7 +96,7 @@ public class NodeDispatcher implements INodeDispatcher {
             Instant lost = disconnectedAt.getAndSet(null);
             if (lost == null) return;
             Duration disconnected =
-                    Duration.between(lost, ts).plus(config.connectionLossDetectionDelay());
+                    Duration.between(lost, ts).plus(client.connectionLossDetectionDelay());
             log.info("disconnect duration {}", disconnected);
             if (disconnected.compareTo(withTolerance(config.reconnectGracePeriod())) >= 0) {
                 reregistrationEpoch.incrementAndGet();
@@ -111,6 +111,11 @@ public class NodeDispatcher implements INodeDispatcher {
      */
     long reregistrationEpoch() {
         return reregistrationEpoch.get();
+    }
+
+    /** Worst-case detection delay of the transport in use. See {@code IClient}. */
+    Duration connectionLossDetectionDelay() {
+        return client.connectionLossDetectionDelay();
     }
 
     private void onMessage(SapientMessage message) {

@@ -33,6 +33,10 @@ class SocketClientReconnectTest {
         // bypass probe-before-connect; these tests use mocked sockets and don't bind
         // a real listener, so a real TCP probe has nothing to connect to
         doReturn(true).when(client).probeReachable(any(Duration.class));
+        // the default NETCAT health check builds a probe from the provider address, so it
+        // must not be null. Nothing listens there, and at a 10s interval it never fires.
+        when(supplier.host()).thenReturn("localhost");
+        when(supplier.port()).thenReturn(1);
     }
 
     @AfterEach

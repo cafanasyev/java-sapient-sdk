@@ -4,7 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.sapient.transport.health.HealthCheckConfig;
 import java.io.IOException;
+import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 class FrameSizeTest {
@@ -73,9 +75,8 @@ class FrameSizeTest {
                         () ->
                                 new SocketClient(
                                         provider,
-                                        java.time.Duration.ofSeconds(1),
-                                        java.time.Duration.ofSeconds(1),
-                                        java.time.Duration.ofSeconds(1),
+                                        HealthCheckConfig.DEFAULT,
+                                        Duration.ofSeconds(1),
                                         0));
         assertTrue(e.getMessage().contains("maxFrameSize"), e.getMessage());
     }

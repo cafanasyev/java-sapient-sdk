@@ -143,12 +143,17 @@ class NodeWrapper implements AutoCloseable {
     private void runStatusLoop(Registration registration) throws InterruptedException {
         var statusInterval = toDuration(registration.getStatusDefinition().getStatusInterval());
         var grace = config.reconnectGracePeriod();
-        var serverRetention =
-                withTolerance(
-                        statusInterval
-                                .multipliedBy(3)
-                                .plus(grace)
-                                .minus(config.connectionLossDetectionDelay()));
+        var detectionDelay = dispatcher.connectionLossDetectionDelay();
+        var rawRetention = serverRetention(statusInterval, grace, detectionDelay);
+        if (rawRetention.isZero()) {
+            log.warn(
+                    "connection loss detection delay {} eats the whole retention budget for node:"
+                            + " {} — the node will re-register on every status tick. Lower the"
+                            + " health check interval or the failure threshold.",
+                    detectionDelay,
+                    node.getNodeId());
+        }
+        var serverRetention = withTolerance(rawRetention);
         Random rng = ThreadLocalRandom.current();
         Instant lastSuccessfulStatusReportAt = Instant.now();
 
@@ -242,6 +247,26 @@ class NodeWrapper implements AutoCloseable {
 
     static Instant toInstant(Timestamp ts) {
         return Instant.ofEpochSecond(ts.getSeconds(), ts.getNanos());
+    }
+
+    /**
+     * How long the server keeps this node's registration after the last confirmed status report.
+     * {@code 3 × statusInterval} is when the server closes the TCP connection, {@code grace} is how
+     * long it keeps the registration after that, and the detection delay is taken off because some
+     * of our status reports went into a socket the client had not yet noticed was dead.
+     *
+     * <p>Clamped at zero: a negative window would mean "re-register on every tick", which floods
+     * the server instead of protecting it.
+     *
+     * @param statusInterval negotiated status report interval
+     * @param grace how long the server retains a registration after closing the connection
+     * @param detectionDelay worst-case connection-loss detection delay of the transport
+     * @return the retention window, never negative
+     */
+    static Duration serverRetention(
+            Duration statusInterval, Duration grace, Duration detectionDelay) {
+        Duration retention = statusInterval.multipliedBy(3).plus(grace).minus(detectionDelay);
+        return retention.isNegative() ? Duration.ZERO : retention;
     }
 
     static Duration toDuration(Registration.Duration d) {

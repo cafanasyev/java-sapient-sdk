@@ -103,7 +103,7 @@ implementation("io.github.cafanasyev:java-sapient-sdk:0.3.2")
    A code sample for all of the above is inside [`SapientConfig.java`](https://github.com/cafanasyev/java-sapient-test-harness/blob/master/src/main/java/io/sapient/SapientConfig.java) — the [java-sapient-test-harness](https://github.com/cafanasyev/java-sapient-test-harness) repository serves as a reference implementation that uses this SDK.
    Use the default provided values of the variables from the test-harness sample.
    The purpose of each variable is documented at the classes which use those variables.
-   Also, the reasoning behind the `socketWatchdogInterval`, `socketProbeTimeout`, `socketInitialReconnectDelay`, and `connectionLossDetectionDelay` variables is described inside [CHANGELOG.md](CHANGELOG.md) (points 3 and 4).
+   The health check settings are explained in [Health checks](#health-checks) below, and the reasoning behind them, `socketInitialReconnectDelay` and the connection-loss detection delay is inside [CHANGELOG.md](CHANGELOG.md) (points 3, 4 and 14).
 3. Pass your INode implementations to the `NodeDispatcher.register(INode node)` method. This is what makes the Dispatcher automate node lifecycle management for you — see [Automated Node Lifecycle Behavior](#automated-node-lifecycle-behavior) below for the full list of what that gets you for free. (The reasoning behind the jitter design is described in [CHANGELOG.md](CHANGELOG.md), point 5.)
 4. Stop managing a Node with `NodeDispatcher.unregister(INode node)` when you no longer want the Dispatcher to report for it.
 5. Close the Dispatcher with `NodeDispatcher.close()` (it is `AutoCloseable`, so try-with-resources works) to shut down the connection and its background threads when you are done.
@@ -111,6 +111,34 @@ implementation("io.github.cafanasyev:java-sapient-sdk:0.3.2")
    * Use the Node Dispatcher to send Detection Reports/Alerts/TaskAcks via the typed `NodeDispatcher.publish(...)` overloads (`publish(DetectionReport|Alert|TaskAck, UUID nodeId, Duration timeout)`);
    * You can invoke sending of Registrations/Status Reports outside of the Node Dispatcher automatic lifecycle — for example if you want to notify the Server about some changes immediately without waiting for the next interval — using the `publish(Registration|StatusReport, UUID nodeId, Duration timeout)` overloads;
    * Call [`IClient.addStateChangeListener(...)`](src/main/java/io/sapient/transport/IClient.java#L65) to subscribe to connection state changes (and [`removeStateChangeListener(...)`](src/main/java/io/sapient/transport/IClient.java#L73) to unsubscribe). You may want to log or run additional logic when, for example, the connection is lost for a prolonged period. You can also poll the connection directly with `getState()`, `isConnected()`, and `probeReachable(Duration)`.
+
+### Health checks
+
+The client watches the connection with one health check. Pick the type that matches your network and the server's keepalive setting.
+
+```java
+var health = new HealthCheckConfig(
+        HealthCheckType.NETCAT,   // NETCAT | ICMP | ECHO | PINGPONG
+        Duration.ofSeconds(10),   // how often a check starts
+        Duration.ofSeconds(2),    // how long one check may take, never above the interval
+        3);                       // failures in a row before the connection is dropped
+
+// the last argument is initialReconnectDelay: the pause before the first reconnect
+// attempt. It grows linearly with each failed attempt (1s, 2s, 3s ...) up to 10x, and
+// resets after a successful connect
+var client = new SocketClient(provider, health, Duration.ofSeconds(1));
+```
+
+| Type | How it works | When to use it                          |
+|---|---|-----------------------------------------|
+| `NETCAT` | Opens and closes a throwaway TCP connection | Default. Works everywhere               |
+| `ICMP` | Runs the system `ping` | ICMP is allowed between node and server |
+| `ECHO` | Sends a zero-length frame, the server echoes it | Server runs in `echo` mode              |
+| `PINGPONG` | Sends a zero-length frame, the server answers `0xFFFFFFFF` | Server runs in `pingpong` mode          |
+
+`ECHO` and `PINGPONG` are not compatible with each other. Both send the same ping and answer differently, so the client and the server must use the same one.
+
+Worst case time to notice a dead link is `failureThreshold × interval + timeout`, 32 seconds with the defaults. `NodeDispatcher` reads it from the client with `IClient.connectionLossDetectionDelay()`, so you never set it twice.
 
 ### Automated Node Lifecycle Behavior
 

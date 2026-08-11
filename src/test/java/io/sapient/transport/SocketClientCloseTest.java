@@ -13,6 +13,8 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import io.sapient.transport.health.HealthCheckConfig;
+import io.sapient.transport.health.HealthCheckType;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -85,6 +87,10 @@ class SocketClientCloseTest {
 
         ISocketProvider provider = mock(ISocketProvider.class);
         when(provider.get()).thenReturn(socket);
+        // the NETCAT health check builds a probe from the provider address, so it must not
+        // be null. Nothing listens there, and at a 30s interval it never fires.
+        when(provider.host()).thenReturn("localhost");
+        when(provider.port()).thenReturn(1);
         return new Endpoint(provider, socket, in, out);
     }
 
@@ -93,9 +99,12 @@ class SocketClientCloseTest {
                 spy(
                         new SocketClient(
                                 provider,
-                                Duration.ofMillis(100),
-                                Duration.ofSeconds(2),
-                                Duration.ofSeconds(30)));
+                                new HealthCheckConfig(
+                                        HealthCheckType.NETCAT,
+                                        Duration.ofSeconds(30),
+                                        Duration.ofMillis(100),
+                                        1),
+                                Duration.ofSeconds(2)));
         doReturn(true).when(client).probeReachable(any(Duration.class));
         return client;
     }
@@ -133,9 +142,12 @@ class SocketClientCloseTest {
                 spy(
                         new SocketClient(
                                 ep.provider(),
-                                Duration.ofMillis(100),
-                                Duration.ofMillis(500),
-                                Duration.ofSeconds(30)));
+                                new HealthCheckConfig(
+                                        HealthCheckType.NETCAT,
+                                        Duration.ofSeconds(30),
+                                        Duration.ofMillis(100),
+                                        1),
+                                Duration.ofMillis(500)));
         // unreachable endpoint parks the run loop in its reconnect backoff
         doReturn(false).when(client).probeReachable(any(Duration.class));
 
