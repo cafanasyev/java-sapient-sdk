@@ -158,7 +158,7 @@ Everything `NodeDispatcher.register(node)` automates for you — you don't need 
 | Close connection when no nodes are online | Closes the connection once no online nodes are left. | ✅ | ✅ |
 | Re-open connection when a node comes online again | Re-opens the connection if at least one online node reappears. | ✅ | ✅ |
 | Auto `StatusReport.Info = INFO_UNCHANGED` when unchanged | Set automatically if the last message has no changes, so unchanged reports aren't treated as new events. | ✅ | ✅ |
-| Auto-populate `StatusReport.Info` if unset | Fills the mandatory field before sending: `INFO_UNCHANGED` when the content repeats the previous report, `INFO_NEW` otherwise. A GOOD BYE report always gets `INFO_NEW`. An explicit `INFO_UNCHANGED` from the node is kept as sent. | ✅ | ❌ |
+| Auto-populate `StatusReport.Info` if unset | Fills the mandatory field before sending: `INFO_UNCHANGED` when the content repeats the previous report, `INFO_NEW` otherwise. A GOOD BYE report always gets `INFO_NEW`. An explicit `INFO_UNCHANGED` from the node is kept as sent. | ✅ | ✅ |
 | Auto-populate `StatusReport.ReportId` if blank | Fills in a fresh ULID before sending, so callers don't need to mint one themselves. | ✅ | ✅ |
 | Auto-populate `DetectionReport.ReportId` if blank | Fills in a fresh ULID before sending, so callers don't need to mint one themselves. | ✅ | ✅ |
 
