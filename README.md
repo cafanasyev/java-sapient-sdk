@@ -82,14 +82,14 @@ Maven:
 <dependency>
     <groupId>io.github.cafanasyev</groupId>
     <artifactId>java-sapient-sdk</artifactId>
-    <version>0.3.1</version>
+    <version>0.3.2</version>
 </dependency>
 ```
 
 Gradle:
 
 ```kotlin
-implementation("io.github.cafanasyev:java-sapient-sdk:0.3.1")
+implementation("io.github.cafanasyev:java-sapient-sdk:0.3.2")
 ```
 
 1. Implement the [INode.java](src/main/java/io/sapient/transmission/INode.java) interface for each Node you want to connect.
@@ -103,7 +103,7 @@ implementation("io.github.cafanasyev:java-sapient-sdk:0.3.1")
    A code sample for all of the above is inside [`SapientConfig.java`](https://github.com/cafanasyev/java-sapient-test-harness/blob/master/src/main/java/io/sapient/SapientConfig.java) — the [java-sapient-test-harness](https://github.com/cafanasyev/java-sapient-test-harness) repository serves as a reference implementation that uses this SDK.
    Use the default provided values of the variables from the test-harness sample.
    The purpose of each variable is documented at the classes which use those variables.
-   Also, the reasoning behind the `socketWatchdogInterval`, `socketProbeTimeout`, `socketInitialReconnectDelay`, and `connectionLossDetectionDelay` variables is described inside [CHANGELOG.md](CHANGELOG.md) (points 3 and 4).
+   The health check settings are explained in [Health checks](#health-checks) below, and the reasoning behind them, `socketInitialReconnectDelay` and the connection-loss detection delay is inside [CHANGELOG.md](CHANGELOG.md) (points 3, 4 and 14).
 3. Pass your INode implementations to the `NodeDispatcher.register(INode node)` method. This is what makes the Dispatcher automate node lifecycle management for you — see [Automated Node Lifecycle Behavior](#automated-node-lifecycle-behavior) below for the full list of what that gets you for free. (The reasoning behind the jitter design is described in [CHANGELOG.md](CHANGELOG.md), point 5.)
 4. Stop managing a Node with `NodeDispatcher.unregister(INode node)` when you no longer want the Dispatcher to report for it.
 5. Close the Dispatcher with `NodeDispatcher.close()` (it is `AutoCloseable`, so try-with-resources works) to shut down the connection and its background threads when you are done.
@@ -111,6 +111,34 @@ implementation("io.github.cafanasyev:java-sapient-sdk:0.3.1")
    * Use the Node Dispatcher to send Detection Reports/Alerts/TaskAcks via the typed `NodeDispatcher.publish(...)` overloads (`publish(DetectionReport|Alert|TaskAck, UUID nodeId, Duration timeout)`);
    * You can invoke sending of Registrations/Status Reports outside of the Node Dispatcher automatic lifecycle — for example if you want to notify the Server about some changes immediately without waiting for the next interval — using the `publish(Registration|StatusReport, UUID nodeId, Duration timeout)` overloads;
    * Call [`IClient.addStateChangeListener(...)`](src/main/java/io/sapient/transport/IClient.java#L65) to subscribe to connection state changes (and [`removeStateChangeListener(...)`](src/main/java/io/sapient/transport/IClient.java#L73) to unsubscribe). You may want to log or run additional logic when, for example, the connection is lost for a prolonged period. You can also poll the connection directly with `getState()`, `isConnected()`, and `probeReachable(Duration)`.
+
+### Health checks
+
+The client watches the connection with one health check. Pick the type that matches your network and the server's keepalive setting.
+
+```java
+var health = new HealthCheckConfig(
+        HealthCheckType.NETCAT,   // NETCAT | ICMP | ECHO | PINGPONG
+        Duration.ofSeconds(10),   // how often a check starts
+        Duration.ofSeconds(2),    // how long one check may take, never above the interval
+        3);                       // failures in a row before the connection is dropped
+
+// the last argument is initialReconnectDelay: the pause before the first reconnect
+// attempt. It grows linearly with each failed attempt (1s, 2s, 3s ...) up to 10x, and
+// resets after a successful connect
+var client = new SocketClient(provider, health, Duration.ofSeconds(1));
+```
+
+| Type | How it works | When to use it                          |
+|---|---|-----------------------------------------|
+| `NETCAT` | Opens and closes a throwaway TCP connection | Default. Works everywhere               |
+| `ICMP` | Runs the system `ping` | ICMP is allowed between node and server |
+| `ECHO` | Sends a zero-length frame, the server echoes it | Server runs in `echo` mode              |
+| `PINGPONG` | Sends a zero-length frame, the server answers `0xFFFFFFFF` | Server runs in `pingpong` mode          |
+
+`ECHO` and `PINGPONG` are not compatible with each other. Both send the same ping and answer differently, so the client and the server must use the same one.
+
+Worst case time to notice a dead link is `failureThreshold × interval + timeout`, 32 seconds with the defaults. `NodeDispatcher` reads it from the client with `IClient.connectionLossDetectionDelay()`, so you never set it twice.
 
 ### Automated Node Lifecycle Behavior
 
@@ -130,6 +158,7 @@ Everything `NodeDispatcher.register(node)` automates for you — you don't need 
 | Close connection when no nodes are online | Closes the connection once no online nodes are left. | ✅ | ✅ |
 | Re-open connection when a node comes online again | Re-opens the connection if at least one online node reappears. | ✅ | ✅ |
 | Auto `StatusReport.Info = INFO_UNCHANGED` when unchanged | Set automatically if the last message has no changes, so unchanged reports aren't treated as new events. | ✅ | ✅ |
+| Auto-populate `StatusReport.Info` if unset | Fills the mandatory field before sending: `INFO_UNCHANGED` when the content repeats the previous report, `INFO_NEW` otherwise. A GOOD BYE report always gets `INFO_NEW`. An explicit `INFO_UNCHANGED` from the node is kept as sent. | ✅ | ✅ |
 | Auto-populate `StatusReport.ReportId` if blank | Fills in a fresh ULID before sending, so callers don't need to mint one themselves. | ✅ | ✅ |
 | Auto-populate `DetectionReport.ReportId` if blank | Fills in a fresh ULID before sending, so callers don't need to mint one themselves. | ✅ | ✅ |
 

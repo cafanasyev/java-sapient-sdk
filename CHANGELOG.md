@@ -429,3 +429,206 @@ A node is now notified whenever the server sends it an `Error`, with the full `E
 `Error` is always logged at DEBUG by the shared incoming-message logging added in §9 — independent
 of message routing, so it is logged whether or not a node is registered for the destination. No
 Error-specific logging is needed.
+
+## 11 — Auto-populate StatusReport.Info when the node leaves it unset
+
+### Problem
+
+`info` is a mandatory field of `StatusReport` (BSI Flex 335 v2.0). The SDK only acted on it when the
+node set `INFO_NEW`: such a report was downgraded to `INFO_UNCHANGED` when the content repeated the
+previous one. A node that left `info` unset published `INFO_UNSPECIFIED`, and its reports never took 
+part in de-duplication at all.
+
+A goodbye report had the same gap. It is sent from `NodeWrapper.close()` on top of whatever
+`node.getStatusReport()` returns, so it usually carried no `info` either.
+
+### Decision
+
+- **Fill `info` at publish time when the node leaves it unset.** `NodeDispatcher` compares the
+  report against the previous one of the same node: `INFO_UNCHANGED` when the content repeats,
+  `INFO_NEW` otherwise. For an unknown (not registered) node there is nothing to compare with, so
+  the value is `INFO_NEW`.
+
+- **Always set `INFO_NEW` on a goodbye** (`system = SYSTEM_GOODBYE`) and keep it out of
+  de-duplication. A node leaving is new information even when the rest of the report did not change.
+
+- **Keep an explicit `INFO_UNCHANGED` from the node as sent.** The node states that the content
+  repeats, so the SDK does not second-guess it. An explicit `INFO_NEW` still gets the existing
+  downgrade to `INFO_UNCHANGED` on repeated content (§7).
+
+### Result
+
+Every published `StatusReport` carries a valid `info`, so nodes no longer have to set the field
+themselves to stay protocol-compliant. De-duplication now works for those nodes as well: identical
+reports go out as `INFO_UNCHANGED`, and a goodbye always goes out as `INFO_NEW`.
+
+## 12 — Update lastStatusReport only after successful send
+
+### Problem
+
+`NodeDispatcher.publish(StatusReport, ...)` stored the report in `NodeWrapper.lastStatusReport` with
+`getAndSet` **before** giving the message to the transport. The store happened even when the send
+then failed. So `lastStatusReport` could hold content the server never received.
+
+That silently lost a state change:
+
+1. The node state changes. The report goes out as `INFO_NEW`.
+2. `IClient.publish` throws — publish deadline reached, or the client was stopped. Nothing reached
+   the server. `NodeWrapper.runStatusLoop` logs the timeout and keeps running.
+3. On the next tick the same content is published again. It equals `lastStatusReport`, so it goes out
+   as `INFO_UNCHANGED`.
+
+The server keeps the old state, and then gets "nothing changed" for a state it never received. The
+change stays invisible until the node content changes again.
+
+The python SDK (py-sapient-sdk) already has this check: a failed write keeps the previous report.
+
+### Decision
+
+- **Read `lastStatusReport`, send, then update it.** The update runs after `IClient.publish` returned
+  without an error. When the send throws, the exception leaves the method and the old value stays on
+  its own — no `try/catch` and no rollback needed.
+
+- **`compareAndSet` instead of `set`.** The read and the write are two steps now, so a concurrent
+  publish of the same node can land between them. The later writer loses instead of overwriting a
+  newer value.
+
+- **Every sent report is stored, with no exceptions.** A report the node pinned to `INFO_UNCHANGED`
+  also reached the server, so it is stored too — otherwise a change could be lost across a pinned
+  report. A goodbye is stored as well. It is harmless: `system` takes part in the content comparison,
+  so a stored goodbye never matches a normal report, and a goodbye itself is always `INFO_NEW`
+  without any comparison (§11).
+
+- **A failed send is treated as "not delivered".** `SocketClient.publish` retries on `IOException`
+  with a fresh connection. It throws only on the publish deadline or on a stopped client. So a clean
+  return means the bytes were written and flushed, but it is no proof that the server processed them.
+  When it is not clear, the SDK assumes the report did not arrive. One case is then one extra
+  `INFO_NEW` with the same content: the server sees the same state twice and nothing breaks. The
+  other case is worse — the SDK would send `INFO_UNCHANGED`, and the server would never learn the
+  new state.
+
+### Result
+
+`lastStatusReport` holds only content that reached the transport without an error. A failed status
+report is sent again as `INFO_NEW` on the next tick, so the server always learns about the change.
+Two tests cover it: a failed publish keeps the next identical report `INFO_NEW`, and a report pinned
+to `INFO_UNCHANGED` is stored for the next comparison.
+
+
+## 13 — Cap the message frame size
+
+### Problem
+
+`SocketClient.readLoop` allocated `new byte[len]` with `len` taken straight from the 4-byte
+length prefix on the wire. Nothing checked the value.
+
+The prefix is unsigned on the wire and signed in Java. A prefix of `0xFFFFFFFF` reads back as
+`-1`, so `new byte[-1]` threw `NegativeArraySizeException`. A large positive prefix threw
+`OutOfMemoryError` instead.
+
+Both are unchecked. `runLoop` catches only `EOFException` and `IOException`, so the exception
+escaped the loop and killed the virtual thread. After that the client was dead for good:
+`running` stayed `true` and `runLoopThread` stayed non-null, so `start()` refused to build a
+replacement loop. Nothing in the log said why.
+
+This is not only a hostile-input problem. `0xFFFFFFFF` is the pong sentinel of keepalive
+solution D, so a peer using that mode would crash the client on its first pong.
+
+### Decision
+
+- **Cap the body at 16 MiB** (`DEFAULT_MAX_FRAME_SIZE`), the same value the SAPIENT server uses.
+  The check widens the prefix with `Integer.toUnsignedLong` before comparing, so `0xFFFFFFFF` is
+  seen as 4294967295 and not as a small negative number. A frame above the cap raises
+  `IOException`, which `runLoop` already handles: the connection is dropped and retried.
+
+- **Let the caller change the cap.** A new `SocketClient` constructor takes `maxFrameSize`, next
+  to the existing timeouts. A deployment that knows its peer sends bigger or smaller messages
+  can set its own value; everything else keeps the 16 MiB default. A non-positive value is
+  rejected in the constructor, so the client cannot be built with a cap that blocks every frame.
+
+- **Catch `RuntimeException` in `runLoop` as well.** The cap fixes the one trigger we know
+  about, not the shape of the failure. Any unchecked exception from the read path is now
+  treated like a connection failure — log it, drop the connection, reconnect — instead of
+  killing the client silently.
+
+### Result
+
+A garbage or hostile length prefix costs one reconnect instead of a permanently dead client.
+A zero-length prefix still produces an empty `SapientMessage`, so nothing changes for a
+well-behaved peer.
+
+## 14 — Four health check types and a configurable failure count
+
+### Problem
+
+The client had one way to check the connection and no tolerance for a single failure.
+
+`SocketClient` ran a watchdog that opened a throwaway TCP connection to `host:port`. There was
+no way to use ICMP where it is allowed, and no way to use the keepalive the SAPIENT server
+implements ([dstl/SAPIENT-Proto-Files#12](https://github.com/dstl/SAPIENT-Proto-Files/issues/12)
+solutions C and D).
+
+The watchdog closed the socket on the **first** failed probe. One dropped packet or one busy
+accept queue cost a full reconnect, and past the grace period a re-registration.
+
+`NodeDispatcherConfig.connectionLossDetectionDelay` had to equal the client's `watchdogInterval
++ probeTimeout`, computed by the caller. Nothing checked it, and a wrong value breaks both
+re-registration checks from §3 and §4.
+
+### Decision
+
+- **One health check type per client**, chosen with `HealthCheckConfig`: `NETCAT` (TCP connect,
+  the old behaviour), `ICMP`, `ECHO` (solution C) and `PINGPONG` (solution D).
+  `TRANSPORT_NATIVE` is reserved for a future gRPC client and rejected by `SocketClient`.
+
+- **Fixed cadence, consecutive-failure count.** Checks start every `interval` whether the
+  previous one passed or failed, and the next check is anchored on the previous check's start.
+  Anchoring on the end would make failed checks retry back to back, so N failures would measure
+  one outage of `N × timeout` instead of tolerating a blip. `timeout <= interval` is enforced,
+  so two checks never overlap and the detection delay stays one line:
+  `failureThreshold × interval + timeout`. This is what SSH, BGP, OSPF, BFD, Kubernetes and gRPC
+  keepalive all do.
+
+- **The transport reports its own detection delay.** `IClient.connectionLossDetectionDelay()`
+  replaces the `NodeDispatcherConfig` field. A failure count cannot carry across transports —
+  gRPC closes on the first missed PING ACK and has no counter — but a duration can. The
+  dispatcher reads one number and never learns which mechanism produced it.
+
+- **Any inbound frame proves liveness.** The read path tells the monitor about every frame, which
+  pushes the next check back by a full interval and answers a pending in-band ping. A pong is
+  only one kind of proof; a `RegistrationAck` works as well. This also makes a wrong-mode setup
+  harmless: a server with keepalive off answers a zero-length frame with a validation `Error`,
+  and that `Error` passes the check.
+
+- **The in-band check queues for the write path like a publisher.** It never interrupts a write
+  in progress. Failing to take the write slot within `timeout` counts as a failed check — a
+  write path blocked that long is not a healthy connection, and it is the one case a priority
+  queue could not fix anyway, since a publisher stuck inside `write()` blocks any single writer
+  too. Known cost: a congested link can fail a check, which is what the failure threshold
+  absorbs.
+
+- **ICMP spawns the system `ping`.** `InetAddress.isReachable` falls back to a TCP connection on
+  port 7 when it cannot get the ICMP privilege, so unprivileged on Linux it calls a healthy host
+  dead. The `ping` binary carries `cap_net_raw` or the setuid bit and works without root, and the
+  Python SDK can do exactly the same.
+
+- **Clamp the retention window at zero.** `3 × statusInterval + grace − detectionDelay` can go
+  negative with a large interval or threshold. A negative window means "re-register on every
+  tick", so it is clamped and logged.
+
+### Result
+
+Four interchangeable liveness checks behind one config record. A single failed check no longer
+costs a reconnect. The detection delay cannot drift out of sync with the transport, because the
+transport is what reports it.
+
+Defaults keep today's mechanism with the standard failure count: `NETCAT`, 10s interval, 2s
+timeout, threshold 3. Detection moves from 12s to 32s — the price of tolerating two lost probes
+instead of zero, absorbed by the retention budget. To get the old speed back, lower the interval
+rather than the threshold: `4s / 2s / 3` detects in 14s and still tolerates two lost probes.
+
+**Breaking:** `NodeDispatcherConfig` lost its `connectionLossDetectionDelay` component and
+`defaults(destinationId, delay)` became `defaults(destinationId)`. The four-argument
+`SocketClient(provider, probeTimeout, initialReconnectDelay, watchdogInterval)` constructor
+became `SocketClient(provider, HealthCheckConfig, initialReconnectDelay)`. The one-argument
+`SocketClient(provider)` is unchanged.

@@ -25,9 +25,19 @@ import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 @Slf4j
 class NodeWrapper implements AutoCloseable {
 
+    /** How long {@link #close()} waits for the lifecycle thread before giving up on it. */
+    private static final Duration THREAD_STOP_TIMEOUT = Duration.ofSeconds(5);
+
     @Getter @NonNull private final INode node;
     @Getter private final AtomicBoolean registered = new AtomicBoolean(false);
+
+    /**
+     * Last status report that reached the transport without an error. The INFO_UNCHANGED
+     * de-duplication compares against it, so it must hold only content the server really received.
+     * A failed send keeps the old value. See CHANGELOG.md §12.
+     */
     @Getter private final AtomicReference<StatusReport> lastStatusReport = new AtomicReference<>();
+
     @Getter private final BlockingQueue<RegistrationAck> ackQueue = new ArrayBlockingQueue<>(1);
 
     private final NodeDispatcher dispatcher;
@@ -133,12 +143,17 @@ class NodeWrapper implements AutoCloseable {
     private void runStatusLoop(Registration registration) throws InterruptedException {
         var statusInterval = toDuration(registration.getStatusDefinition().getStatusInterval());
         var grace = config.reconnectGracePeriod();
-        var serverRetention =
-                withTolerance(
-                        statusInterval
-                                .multipliedBy(3)
-                                .plus(grace)
-                                .minus(config.connectionLossDetectionDelay()));
+        var detectionDelay = dispatcher.connectionLossDetectionDelay();
+        var rawRetention = serverRetention(statusInterval, grace, detectionDelay);
+        if (rawRetention.isZero()) {
+            log.warn(
+                    "connection loss detection delay {} eats the whole retention budget for node:"
+                            + " {} — the node will re-register on every status tick. Lower the"
+                            + " health check interval or the failure threshold.",
+                    detectionDelay,
+                    node.getNodeId());
+        }
+        var serverRetention = withTolerance(rawRetention);
         Random rng = ThreadLocalRandom.current();
         Instant lastSuccessfulStatusReportAt = Instant.now();
 
@@ -175,10 +190,16 @@ class NodeWrapper implements AutoCloseable {
         }
     }
 
+    /**
+     * Stops the node and sends its goodbye. Returns only once the lifecycle thread has terminated,
+     * so nothing this node does can still reach the transport afterwards — the dispatcher relies on
+     * that to close the client only after every node is done with it.
+     */
     @Override
     public void close() {
         log.info("stopping node: {} gracefully", node.getNodeId());
         thread.interrupt();
+        awaitThreadStop();
         if (!registered.getAndSet(false)) return;
         try {
             log.info("sending goodbye for the node: {}", node.getNodeId());
@@ -187,6 +208,25 @@ class NodeWrapper implements AutoCloseable {
             log.error("failed to send goodbye for the node: {}", node.getNodeId(), e);
         }
         log.info("node: {} gracefully stopped", node.getNodeId());
+    }
+
+    private void awaitThreadStop() {
+        if (thread == Thread.currentThread()) {
+            return;
+        }
+        try {
+            thread.join(THREAD_STOP_TIMEOUT);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("interrupted while stopping node: {}", node.getNodeId());
+            return;
+        }
+        if (thread.isAlive()) {
+            log.error(
+                    "node: {} did not stop within {} — it may still publish",
+                    node.getNodeId(),
+                    THREAD_STOP_TIMEOUT);
+        }
     }
 
     private void sendGoodbye() throws TimeoutException, InterruptedException {
@@ -207,6 +247,26 @@ class NodeWrapper implements AutoCloseable {
 
     static Instant toInstant(Timestamp ts) {
         return Instant.ofEpochSecond(ts.getSeconds(), ts.getNanos());
+    }
+
+    /**
+     * How long the server keeps this node's registration after the last confirmed status report.
+     * {@code 3 × statusInterval} is when the server closes the TCP connection, {@code grace} is how
+     * long it keeps the registration after that, and the detection delay is taken off because some
+     * of our status reports went into a socket the client had not yet noticed was dead.
+     *
+     * <p>Clamped at zero: a negative window would mean "re-register on every tick", which floods
+     * the server instead of protecting it.
+     *
+     * @param statusInterval negotiated status report interval
+     * @param grace how long the server retains a registration after closing the connection
+     * @param detectionDelay worst-case connection-loss detection delay of the transport
+     * @return the retention window, never negative
+     */
+    static Duration serverRetention(
+            Duration statusInterval, Duration grace, Duration detectionDelay) {
+        Duration retention = statusInterval.multipliedBy(3).plus(grace).minus(detectionDelay);
+        return retention.isNegative() ? Duration.ZERO : retention;
     }
 
     static Duration toDuration(Registration.Duration d) {
