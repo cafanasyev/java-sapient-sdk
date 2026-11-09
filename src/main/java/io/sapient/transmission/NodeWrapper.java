@@ -88,12 +88,14 @@ class NodeWrapper implements AutoCloseable {
         }
 
         if (!Thread.currentThread().isInterrupted()) {
-            try {
-                sendGoodbye();
-            } catch (TimeoutException e) {
-                log.error("goodbye publish timeout for node: {}", node.getNodeId(), e);
+            // a node the server never accepted has nothing to say goodbye to
+            if (registered.getAndSet(false)) {
+                try {
+                    sendGoodbye();
+                } catch (TimeoutException e) {
+                    log.error("goodbye publish timeout for node: {}", node.getNodeId(), e);
+                }
             }
-            registered.set(false);
             lastStatusReport.set(null);
         }
     }

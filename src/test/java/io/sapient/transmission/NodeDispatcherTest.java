@@ -298,6 +298,40 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
+    void noGoodbyeWhenNodeGoesOfflineAfterRejectedRegistration() throws Exception {
+        UUID nodeId = UUID.randomUUID();
+        AtomicBoolean online = new AtomicBoolean(true);
+        IClient client = mockClient();
+        INode node = mockNode(nodeId, online, 200);
+        NodeDispatcher dispatcher =
+                spy(
+                        new NodeDispatcher(
+                                client,
+                                new NodeDispatcherConfig(
+                                        Duration.ofMillis(10),
+                                        Duration.ofMillis(200),
+                                        Duration.ofMillis(200),
+                                        Duration.ofMinutes(2),
+                                        FUSION_NODE_ID,
+                                        Duration.ZERO)));
+        Consumer<SapientMessage> onMessage = captureSubscription(client);
+
+        dispatcher.register(node);
+
+        verify(dispatcher, timeout(1000))
+                .publish(any(Registration.class), eq(nodeId), any(Duration.class));
+        sendAck(onMessage, nodeId, false);
+        online.set(false);
+
+        // the client is closed only after the lifecycle has passed the goodbye step
+        verify(client, timeout(1000)).close();
+        verify(dispatcher, never()).publish(isGoodbye(), eq(nodeId), any(Duration.class));
+
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
     void goodbyeSentWhenNodeGoesOffline() throws Exception {
         try (var s = setup(50)) {
             s.online.set(true);
