@@ -8,6 +8,8 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.spy;
 
+import io.sapient.transport.health.HealthCheckConfig;
+import io.sapient.transport.health.HealthCheckType;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.ServerSocket;
@@ -107,18 +109,22 @@ class SocketClientTest {
                 new TestSocketProvider(
                         "localhost", () -> port, () -> new Socket("localhost", port));
         var states = new LinkedBlockingQueue<ConnectionState>();
-        // 100ms watchdog interval and 200ms probe timeout — the watchdog must detect
-        // the server being gone and tear the connection down within the test's 5s budget,
-        // without any reliance on SO_TIMEOUT.
+        // 100ms check interval, 100ms check timeout, one failure is enough — the health
+        // check must detect the server being gone and tear the connection down within the
+        // test's 5s budget, without any reliance on SO_TIMEOUT.
         var client =
                 spy(
                         new SocketClient(
                                 provider,
-                                Duration.ofMillis(200),
-                                Duration.ofMillis(10),
-                                Duration.ofMillis(100)));
-        // stateful stub: true lets the client reach the server's single accept();
-        // flipping to false simulates the server becoming unreachable for the watchdog
+                                new HealthCheckConfig(
+                                        HealthCheckType.NETCAT,
+                                        Duration.ofMillis(100),
+                                        Duration.ofMillis(100),
+                                        1),
+                                Duration.ofMillis(10)));
+        // stateful stub for the pre-connect probe only: true lets the client reach the
+        // server's single accept(). The NETCAT health check opens its own connection and
+        // does not go through this method.
         var probeAlive = new AtomicBoolean(true);
         doAnswer(inv -> probeAlive.get()).when(client).probeReachable(any(Duration.class));
         client.addStateChangeListener((s, ts) -> states.add(s));
@@ -133,15 +139,15 @@ class SocketClientTest {
 
             assertEquals(ConnectionState.CONNECTED, states.poll(2, SECONDS));
 
-            // simulate the server becoming unreachable. readLoop stays blocked on the
-            // still-open TCP socket; the watchdog is the only mechanism that can notice.
-            // When the next probe returns false the watchdog closes the socket, which
-            // unblocks readLoop and fires DISCONNECTED.
+            // the server stops listening while the accepted socket stays open, so readLoop
+            // stays blocked on a half-open TCP connection. The health check is the only
+            // mechanism that can notice: its next connect is refused, the monitor closes
+            // the socket, readLoop wakes and DISCONNECTED fires.
+            serverSocket.close();
             probeAlive.set(false);
 
             assertEquals(ConnectionState.DISCONNECTED, states.poll(2, SECONDS));
             accepted.close();
-            serverSocket.close();
         }
     }
 
@@ -162,9 +168,12 @@ class SocketClientTest {
         var client =
                 new SocketClient(
                         provider,
-                        Duration.ofMillis(100),
-                        Duration.ofMillis(10),
-                        Duration.ofSeconds(10));
+                        new HealthCheckConfig(
+                                HealthCheckType.NETCAT,
+                                Duration.ofSeconds(10),
+                                Duration.ofMillis(100),
+                                1),
+                        Duration.ofMillis(10));
         client.addStateChangeListener((s, ts) -> states.add(s));
 
         try (client) {

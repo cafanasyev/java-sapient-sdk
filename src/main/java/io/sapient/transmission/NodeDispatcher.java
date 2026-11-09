@@ -52,6 +52,7 @@ public class NodeDispatcher implements INodeDispatcher {
 
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
     private final AtomicBoolean clientRunning = new AtomicBoolean(false);
+    private final AtomicBoolean closing = new AtomicBoolean(false);
 
     // fraction applied to period thresholds so scheduler jitter and GC pauses of a few
     // milliseconds do not mask a real outage at the boundary
@@ -95,7 +96,7 @@ public class NodeDispatcher implements INodeDispatcher {
             Instant lost = disconnectedAt.getAndSet(null);
             if (lost == null) return;
             Duration disconnected =
-                    Duration.between(lost, ts).plus(config.connectionLossDetectionDelay());
+                    Duration.between(lost, ts).plus(client.connectionLossDetectionDelay());
             log.info("disconnect duration {}", disconnected);
             if (disconnected.compareTo(withTolerance(config.reconnectGracePeriod())) >= 0) {
                 reregistrationEpoch.incrementAndGet();
@@ -110,6 +111,11 @@ public class NodeDispatcher implements INodeDispatcher {
      */
     long reregistrationEpoch() {
         return reregistrationEpoch.get();
+    }
+
+    /** Worst-case detection delay of the transport in use. See {@code IClient}. */
+    Duration connectionLossDetectionDelay() {
+        return client.connectionLossDetectionDelay();
     }
 
     private void onMessage(SapientMessage message) {
@@ -255,16 +261,29 @@ public class NodeDispatcher implements INodeDispatcher {
         try {
             NodeWrapper w = onlineNodes.remove(id);
             if (w != null) offlineNodes.put(id, w);
-            if (onlineNodes.isEmpty()) {
-                try {
-                    client.close();
-                    clientRunning.set(false);
-                } catch (Exception e) {
-                    log.error("failed to close client", e);
-                }
+            // during shutdown the client is closed by close() itself, once every node has
+            // said goodbye — a node dropping out here must not pull it out from under them
+            if (onlineNodes.isEmpty() && !closing.get()) {
+                closeClientIfNeeded();
             }
         } finally {
             rwLock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Closes the underlying client, at most once per {@link #onNodeOnline} start. Both the node
+     * threads and {@link #close()} reach this point, so the flag is what keeps a shutdown with
+     * several nodes from closing the same client over and over.
+     */
+    private void closeClientIfNeeded() {
+        if (!clientRunning.compareAndSet(true, false)) {
+            return;
+        }
+        try {
+            client.close();
+        } catch (Exception e) {
+            log.error("failed to close client", e);
         }
     }
 
@@ -278,10 +297,23 @@ public class NodeDispatcher implements INodeDispatcher {
     public void unregister(INode node) {
         log.info("unregistering the node: {}", node.getNodeId());
         UUID id = node.getNodeId();
-        NodeWrapper wrapper = offlineNodes.remove(id);
-        if (wrapper == null) wrapper = onlineNodes.remove(id);
+        NodeWrapper offline;
+        NodeWrapper online = null;
+        rwLock.writeLock().lock();
+        try {
+            offline = offlineNodes.remove(id);
+            if (offline == null) online = onlineNodes.remove(id);
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+        NodeWrapper wrapper = offline != null ? offline : online;
         if (wrapper == null) return;
         wrapper.close();
+        // unregister() takes the node out of the map itself rather than through
+        // onNodeOffline, so it has to close the client the same way that callback would
+        if (online != null && onlineNodes.isEmpty()) {
+            closeClientIfNeeded();
+        }
     }
 
     @Override
@@ -297,13 +329,44 @@ public class NodeDispatcher implements INodeDispatcher {
             status = status.toBuilder().setReportId(newReportId()).build();
         }
         NodeWrapper node = findNode(nodeId);
-        if (node != null && status.getInfo() == StatusReport.Info.INFO_NEW) {
-            StatusReport prev = node.getLastStatusReport().getAndSet(status);
-            if (prev != null && contentEquals(prev, status)) {
-                status = status.toBuilder().setInfo(StatusReport.Info.INFO_UNCHANGED).build();
-            }
+        StatusReport prev = node == null ? null : node.getLastStatusReport().get();
+        status = withInfo(status, prev);
+        SapientMessage message =
+                publish(SapientMessage.newBuilder().setStatusReport(status), nodeId, timeout);
+        if (node != null) {
+            // store only after the send returned without error. A failed send must keep the old
+            // value, or the next identical report goes out as INFO_UNCHANGED for content the server
+            // never received. compareAndSet loses to a concurrent publish of the same node instead
+            // of overwriting its newer value. See CHANGELOG.md §12.
+            node.getLastStatusReport().compareAndSet(prev, status);
         }
-        return publish(SapientMessage.newBuilder().setStatusReport(status), nodeId, timeout);
+        return message;
+    }
+
+    /**
+     * Fills the mandatory {@code info} field of a status report. A goodbye always reports new
+     * information, so it is set to INFO_NEW and never de-duplicated. For any other report the value
+     * is INFO_UNCHANGED when the content repeats {@code prev} and INFO_NEW otherwise. An explicit
+     * INFO_UNCHANGED from the caller is kept as sent.
+     *
+     * <p>A node that leaves {@code info} unset gets a valid value instead of INFO_UNSPECIFIED.
+     *
+     * @param prev last status report the node sent successfully, or {@code null} when there is none
+     *     — a fresh node, or an unknown (not registered) node. Then there is nothing to compare
+     *     with, so the content is new.
+     */
+    private static StatusReport withInfo(StatusReport status, StatusReport prev) {
+        if (status.getSystem() == StatusReport.System.SYSTEM_GOODBYE) {
+            return withInfo(status, StatusReport.Info.INFO_NEW);
+        }
+        if (status.getInfo() == StatusReport.Info.INFO_UNCHANGED) return status;
+        boolean unchanged = prev != null && contentEquals(prev, status);
+        return withInfo(
+                status, unchanged ? StatusReport.Info.INFO_UNCHANGED : StatusReport.Info.INFO_NEW);
+    }
+
+    private static StatusReport withInfo(StatusReport status, StatusReport.Info info) {
+        return status.getInfo() == info ? status : status.toBuilder().setInfo(info).build();
     }
 
     /**
@@ -389,18 +452,21 @@ public class NodeDispatcher implements INodeDispatcher {
                 .build();
     }
 
+    /**
+     * Stops every registered node and then the underlying client. Each node is stopped completely —
+     * its lifecycle thread has terminated and its goodbye has been sent — before the next one is
+     * touched, and the client is closed last, so no node loses its goodbye to a client that another
+     * node has already closed.
+     */
     @Override
     public void close() {
         log.info("stopping the dispatcher gracefully");
+        closing.set(true);
         onlineNodes.values().forEach(NodeWrapper::close);
         offlineNodes.values().forEach(NodeWrapper::close);
         onlineNodes.clear();
         offlineNodes.clear();
-        try {
-            client.close();
-        } catch (Exception e) {
-            log.error("failed to close client", e);
-        }
+        closeClientIfNeeded();
         log.info("dispatcher stopped");
     }
 }
