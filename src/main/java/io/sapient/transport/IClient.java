@@ -21,8 +21,10 @@ public interface IClient extends AutoCloseable {
      * Publishes a SAPIENT message to the connected server.
      *
      * @param msg message to send
-     * @param timeout maximum time to wait for the connection and write
-     * @throws TimeoutException if the operation exceeds the given timeout
+     * @param timeout maximum time the call blocks, covering both the wait for the connection and
+     *     the write
+     * @throws TimeoutException if the operation exceeds the given timeout. When the timeout hits
+     *     during the write, the message may still reach the server
      * @throws InterruptedException if the calling thread is interrupted or the client is stopped
      */
     void publish(SapientMessage msg, Duration timeout)

@@ -71,7 +71,7 @@ The SDK is built around four interfaces. To familiarize yourself with the intern
 
 - [`INode`](src/main/java/io/sapient/transmission/INode.java) — a SAPIENT edge/fusion node you implement (identity, registration, and server-to-node callbacks).
 - [`INodeDispatcher`](src/main/java/io/sapient/transmission/INodeDispatcher.java) — manages node registration, the keep-alive/status-report lifecycle, and message routing.
-- [`IClient`](src/main/java/io/sapient/transport/IClient.java) — the transport: publish/subscribe typed SAPIENT messages plus connection-state monitoring. `SocketClient` serializes concurrent publishes through a single fair (FIFO) permit, so competing writer threads are served in arrival order and none is starved.
+- [`IClient`](src/main/java/io/sapient/transport/IClient.java) — the transport: publish/subscribe typed SAPIENT messages plus connection-state monitoring. `SocketClient` serializes concurrent publishes through a single fair (FIFO) permit, so competing writer threads are served in arrival order and none is starved. A publish never blocks past its timeout, even when the write stalls. A frame already being written is still finished, so a timeout during the write does not mean the message was not sent.
 - [`ISocketProvider`](src/main/java/io/sapient/transport/ISocketProvider.java) — supplies the socket (host/port and TLS vs. plain) to the client.
 
 Add the SDK to your build.

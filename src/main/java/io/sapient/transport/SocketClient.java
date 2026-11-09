@@ -23,6 +23,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -169,7 +171,9 @@ public class SocketClient implements IClient {
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     // connection slot: empty = disconnected, contains connection = available for publishing
-    // capacity 1 acts as both connection gate and publish mutex
+    // capacity 1 acts as both connection gate and publish mutex. The write thread puts the
+    // connection back only after the last byte of its frame. A publish that timed out has
+    // already returned by then (see writeFrame)
     private final BlockingQueue<Connection> connectionSlot = new ArrayBlockingQueue<>(1, true);
 
     private final AtomicReference<Consumer<SapientMessage>> consumer = new AtomicReference<>();
@@ -326,12 +330,16 @@ public class SocketClient implements IClient {
      * disconnected) and a publishing mutex (only one publisher can hold the connection at a time).
      *
      * @param msg - message to be sent to the server.
-     * @param timeout - timeout for waiting on both publish serialization and connection availability.
-     * @throws TimeoutException - will be thrown if publish is blocked by other threads for period above
-     *                          the specified timeout or SocketClient is unable to reconnect to the server
-     *                          socket within the specified timeout.
+     * @param timeout - deadline for the whole call: waiting for the connection, waiting behind other
+     *                publishers, and the write itself. The call never blocks past the deadline.
+     * @throws TimeoutException - will be thrown if the deadline passes first. If thrown before the
+     *                          write started, the message was not sent. If thrown during the write,
+     *                          the write thread still finishes the frame, and the server gets the
+     *                          message unless the connection dies. A caller that retries may then
+     *                          deliver the message twice.
      * @throws InterruptedException - will be thrown if the calling Thread is interrupted or the SocketClient
-     *                              is stopped.
+     *                              is stopped. An interrupt during the write stops only the wait. The
+     *                              frame still goes out, as after a timeout.
      */
     @Override
     @ThreadSafe
@@ -342,6 +350,7 @@ public class SocketClient implements IClient {
         }
 
         long deadline = System.nanoTime() + timeout.toNanos();
+        byte[] frame = frame(msg.toByteArray());
 
         // trying to reconnect and write message only until timeout reached or SocketClient is
         // stopped
@@ -360,28 +369,81 @@ public class SocketClient implements IClient {
                 continue;
             }
 
-            try {
-                byte[] bytes = msg.toByteArray();
-                int len = bytes.length;
-                byte[] frame =
-                        ByteBuffer.allocate(4 + len)
-                                .order(ByteOrder.LITTLE_ENDIAN)
-                                .putInt(len)
-                                .put(bytes)
-                                .array();
-                conn.out.write(frame);
-                conn.out.flush();
-                if (conn.isUsable() && !connectionSlot.offer(conn)) {
-                    log.error("failed to return connection to slot");
-                }
+            if (writeFrame(conn, frame, deadline)) {
                 return;
-            } catch (IOException e) {
-                log.error("failed to publish message to the server", e);
-                // don't put back — slot stays empty until reconnect re-offers
             }
+            // the connection died during the write; the loop waits for the next connection
         }
 
         throw new InterruptedException("SocketClient has been stopped");
+    }
+
+    /** Prepends the 4-byte little-endian length prefix required by BSI Flex 335 v2.0 §4.2. */
+    private static byte[] frame(byte[] body) {
+        return ByteBuffer.allocate(4 + body.length)
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(body.length)
+                .put(body)
+                .array();
+    }
+
+    /**
+     * Writes one frame on a new virtual thread, the write thread. The caller waits for the write
+     * thread until {@code deadline}. The caller must hold {@code conn}, taken from {@link
+     * #connectionSlot}. From here the write thread holds {@code conn}, and puts {@code conn} back
+     * into the slot after the last byte is out.
+     *
+     * <p>The write thread always finishes a frame it started. The peer reads exactly as many bytes
+     * as the length prefix says. If a new frame started after half of this frame, the peer would
+     * read the new frame's bytes as the rest of this frame. Every later frame on the connection
+     * would then be misread.
+     *
+     * <p>If the deadline comes first, the caller stops waiting and the write thread keeps writing.
+     * The next writer waits for the slot until the frame is done.
+     *
+     * <p>Nothing interrupts the write thread. An interrupt of the caller stops only the caller's
+     * wait. On a virtual thread, an interrupt during a socket write closes the socket. A closed
+     * socket would drop the connection for every other publisher.
+     *
+     * @return {@code true} once the whole frame is written, {@code false} if the connection died
+     *     during the write
+     * @throws TimeoutException if the frame is still being written at the deadline
+     * @throws InterruptedException if the calling thread is interrupted while waiting. The frame
+     *     still goes out, as after a timeout
+     */
+    private boolean writeFrame(Connection conn, byte[] frame, long deadline)
+            throws TimeoutException, InterruptedException {
+        FutureTask<Boolean> write = new FutureTask<>(() -> writeAndRelease(conn, frame));
+        Thread.ofVirtual().name("sapient-writer").start(write);
+        try {
+            return write.get(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
+        } catch (TimeoutException e) {
+            throw new TimeoutException("publish timeout: frame still being written");
+        } catch (ExecutionException e) {
+            // writeAndRelease catches IOException itself, so only an unchecked exception gets here
+            throw new IllegalStateException("frame write failed", e.getCause());
+        }
+    }
+
+    /**
+     * Runs on the write thread. Puts the connection back into the slot only after the last byte is
+     * out, so no other frame can start in the middle of this frame.
+     *
+     * @return {@code true} once the whole frame is written, {@code false} if the write failed
+     */
+    private boolean writeAndRelease(Connection conn, byte[] frame) {
+        try {
+            conn.out.write(frame);
+            conn.out.flush();
+        } catch (IOException e) {
+            log.error("failed to write to the server", e);
+            // don't put back — slot stays empty until reconnect re-offers
+            return false;
+        }
+        if (conn.isUsable() && !connectionSlot.offer(conn)) {
+            log.error("failed to return connection to slot");
+        }
+        return true;
     }
 
     /***
@@ -523,31 +585,28 @@ public class SocketClient implements IClient {
      * Writes a bare 4-byte prefix on the live connection for the in-band health check.
      *
      * <p>It queues on {@code connectionSlot} like any publisher, so a write already in progress is
-     * never interrupted. Returning {@code false} when the slot cannot be taken in time is what
-     * turns a blocked write path into a failed check.
+     * never interrupted. It returns {@code false} when the slot cannot be taken in time. It also
+     * returns {@code false} when the ping is still being written at the timeout. Either way, a
+     * blocked write path becomes a failed check.
+     *
+     * <p>The ping goes through {@link #writeFrame}, so the monitor thread never writes to the
+     * socket itself. A monitor thread stuck inside {@code write()} would stop counting failed
+     * checks, and the dead connection would never be dropped.
      */
     private boolean writePrefix(int prefix, Duration timeout) {
-        Connection conn;
+        long deadline = System.nanoTime() + timeout.toNanos();
+        byte[] ping = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(prefix).array();
         try {
-            conn = connectionSlot.poll(timeout.toNanos(), TimeUnit.NANOSECONDS);
+            Connection conn = connectionSlot.poll(timeout.toNanos(), TimeUnit.NANOSECONDS);
+            if (conn == null || !conn.isUsable()) {
+                return false;
+            }
+            return writeFrame(conn, ping, deadline);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
-        }
-        if (conn == null || !conn.isUsable()) {
-            return false;
-        }
-        try {
-            conn.out.write(
-                    ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(prefix).array());
-            conn.out.flush();
-            if (conn.isUsable() && !connectionSlot.offer(conn)) {
-                log.error("failed to return connection to slot");
-            }
-            return true;
-        } catch (IOException e) {
-            log.error("failed to write keepalive prefix", e);
-            // don't put back — the slot stays empty until reconnect re-offers, same as publish
+        } catch (TimeoutException e) {
+            // the ping write is blocked on a full send buffer, so the check fails
             return false;
         }
     }

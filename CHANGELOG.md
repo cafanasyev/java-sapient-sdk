@@ -632,3 +632,73 @@ rather than the threshold: `4s / 2s / 3` detects in 14s and still tolerates two 
 `SocketClient(provider, probeTimeout, initialReconnectDelay, watchdogInterval)` constructor
 became `SocketClient(provider, HealthCheckConfig, initialReconnectDelay)`. The one-argument
 `SocketClient(provider)` is unchanged.
+
+## 15 — Make the publish timeout cover the write
+
+### Problem
+
+`SocketClient.publish` counted the wait for the connection against its timeout, but not the
+write. `OutputStream.write()` on a blocking socket has no time limit. When the server stops
+reading, the send buffer fills and `write()` blocks until the server reads again or the
+connection dies. A publish with a 5s timeout blocked until the health check dropped the
+connection, up to 32s with the defaults. A health check that kept passing left the publish
+blocked forever.
+
+The write cannot be abandoned at the deadline. The server reads exactly as many bytes as the
+length prefix says. If a new frame started after half of the current frame, the server would
+read the new frame's bytes as the rest of the current frame. Every later frame on the
+connection would then be misread. Closing the socket at the deadline keeps the framing safe,
+but one caller's timeout would then drop the connection for every node.
+
+The same blocking write caused two more failures:
+
+- The in-band health check wrote its ping on the monitor thread. With the send buffer full, the
+  monitor thread blocked inside `write()`. The monitor stopped counting failed checks, so the
+  dead connection was never dropped.
+- `NodeWrapper.close()` interrupts the node's virtual thread. On a virtual thread, an interrupt
+  during a socket write closes the socket. Stopping a node in the middle of a write dropped the
+  connection for all nodes.
+
+### Decision
+
+- **Each frame is written on a new virtual thread, the write thread.** The caller takes the
+  connection from the slot as before and hands the frame to the write thread. Then the caller
+  waits for the write thread with `Future.get` until the deadline. The write thread puts the
+  connection back into the slot only after the last byte, so no other frame can start in the
+  middle of the current frame. This is the Go pattern of a goroutine plus `select` on
+  `ctx.Done()`.
+
+- **A timeout stops the wait, not the write.** At the deadline `publish` throws
+  `TimeoutException("publish timeout: frame still being written")`. The write thread keeps
+  writing, and the next publisher waits for the slot until the frame is done. The socket stays
+  open.
+
+- **Nothing interrupts the write thread.** An interrupt of the caller stops only the caller's
+  wait. `Future.cancel(true)` is never called: it would interrupt the write thread, and the
+  interrupt would close the socket.
+
+- **The ping goes through the same write thread.** The monitor thread never writes to the socket
+  itself. A ping still being written at the check timeout counts as a failed check, the same as
+  a write slot that cannot be taken in time.
+
+### Result
+
+`publish` never blocks past its timeout. Only the thread holding the slot starts a write thread,
+so each connection has at most one stuck write. Every other publisher waits for the slot and
+times out without sending. A write thread costs 4–5 µs per publish, measured on the development
+machine.
+
+A `TimeoutException` now has two meanings. Thrown before the write started, the message was not
+sent. Thrown during the write, the message still reaches the server unless the connection dies.
+A caller that retries may then deliver the message twice. The Python SDK behaves the same way:
+`writer.write()` puts the whole frame into the buffer, and the timeout cancels only `drain()`.
+
+The callers in this SDK handle the second meaning. `NodeWrapper` treats `TimeoutException` as
+"try again on the next cycle". After a timed-out status report, `lastStatusReport` keeps the old
+value. A repeat of the timed-out content therefore goes out as `INFO_NEW`, which is safe even if
+the first copy arrived.
+
+Known limit: with `NETCAT` or `ICMP` checks, a server that stops reading but still accepts TCP
+connections is never declared dead. The write thread stays stuck, and every publish times out.
+The old code had the same limit. `ECHO` and `PINGPONG` catch this case: the pings cannot get
+through, and the monitor drops the connection after `failureThreshold` failed checks.
