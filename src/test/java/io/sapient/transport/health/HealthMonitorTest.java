@@ -67,6 +67,25 @@ class HealthMonitorTest {
 
     @Test
     @Timeout(10)
+    void testThrowingCheckCountsAsAFailure() throws Exception {
+        var calls = new AtomicInteger();
+        IHealthCheck check =
+                () -> {
+                    calls.incrementAndGet();
+                    throw new IllegalStateException("broken check");
+                };
+        var dead = new CountDownLatch(1);
+        var monitor = new HealthMonitor(check, config(3), dead::countDown);
+        Thread t = Thread.ofVirtual().start(monitor);
+
+        assertTrue(dead.await(3, SECONDS), "three throwing checks must declare the link dead");
+        assertEquals(3, calls.get());
+
+        t.interrupt();
+    }
+
+    @Test
+    @Timeout(10)
     void testOneSuccessResetsTheFailureCount() throws Exception {
         var check = new FakeCheck();
         var dead = new AtomicBoolean(false);

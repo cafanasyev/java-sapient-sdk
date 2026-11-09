@@ -69,7 +69,7 @@ public class HealthMonitor implements Runnable {
             }
 
             lastCheckStartedNanos = System.nanoTime();
-            if (check.check()) {
+            if (runCheck()) {
                 failures = 0;
                 continue;
             }
@@ -82,6 +82,21 @@ public class HealthMonitor implements Runnable {
                 onDead.run();
                 return;
             }
+        }
+    }
+
+    /**
+     * Runs one check. A check that throws counts as a failed check: an exception escaping {@link
+     * #run()} would end the monitor thread, and the link would never be checked again.
+     *
+     * @return {@code true} if the peer proved it is alive
+     */
+    private boolean runCheck() {
+        try {
+            return check.check();
+        } catch (RuntimeException e) {
+            log.error("health check threw, counting it as a failed check", e);
+            return false;
         }
     }
 
