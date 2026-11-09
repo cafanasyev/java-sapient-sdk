@@ -16,17 +16,24 @@ class InBandHealthCheckTest {
     @Test
     @Timeout(10)
     void testAliveWhenAnswerArrives() throws Exception {
-        var check = new InBandHealthCheck(0x00000000, TIMEOUT, (prefix, t) -> true);
-
-        // the read path sees the pong shortly after the ping goes out
-        Thread.ofVirtual()
-                .start(
-                        () -> {
-                            sleepQuietly(50);
-                            check.onInbound();
+        // the lambda needs the object it is passed into, so hold it in a one-slot array
+        var self = new InBandHealthCheck[1];
+        self[0] =
+                new InBandHealthCheck(
+                        0x00000000,
+                        TIMEOUT,
+                        (prefix, t) -> {
+                            // the read path sees the pong shortly after the ping goes out
+                            Thread.ofVirtual()
+                                    .start(
+                                            () -> {
+                                                sleepQuietly(50);
+                                                self[0].onInbound();
+                                            });
+                            return true;
                         });
 
-        assertTrue(check.check());
+        assertTrue(self[0].check());
     }
 
     @Test
@@ -83,14 +90,37 @@ class InBandHealthCheckTest {
 
     @Test
     @Timeout(10)
-    void testAnswerFromAPreviousCheckDoesNotCountTwice() {
+    void testAnswerFromBeforeTheCheckDoesNotCount() {
+        // the monitor checks only a full interval after the last inbound frame, so a frame
+        // that is already waiting when the check starts is at least that old
         var check = new InBandHealthCheck(0x00000000, TIMEOUT, (prefix, t) -> true);
 
         check.onInbound();
-        assertTrue(check.check(), "the pending answer satisfies this check");
 
-        // nothing new arrived, so the next check must not reuse the old answer
         assertFalse(check.check());
+    }
+
+    @Test
+    @Timeout(10)
+    void testSlowWriteAndTheAnswerShareOneTimeout() {
+        // the write takes almost the whole timeout, so the wait for the answer gets only
+        // what is left of it
+        var check =
+                new InBandHealthCheck(
+                        0x00000000,
+                        TIMEOUT,
+                        (prefix, t) -> {
+                            sleepQuietly(TIMEOUT.toMillis() - 20);
+                            return true;
+                        });
+
+        long started = System.nanoTime();
+        assertFalse(check.check());
+        long elapsedMillis = Duration.ofNanos(System.nanoTime() - started).toMillis();
+
+        assertTrue(
+                elapsedMillis < TIMEOUT.toMillis() * 3 / 2,
+                "the check took " + elapsedMillis + " ms");
     }
 
     private static void sleepQuietly(long millis) {

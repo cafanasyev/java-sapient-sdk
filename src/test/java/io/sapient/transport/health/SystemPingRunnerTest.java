@@ -1,13 +1,26 @@
 package io.sapient.transport.health;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 
 class SystemPingRunnerTest {
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void testHungProcessIsKilledAtTheTimeout() {
+        // sleep stands in for a ping that does not exit on its own
+        long started = System.nanoTime();
+        assertFalse(new SystemPingRunner().run(List.of("sleep", "5"), Duration.ofMillis(300)));
+        long elapsedMillis = Duration.ofNanos(System.nanoTime() - started).toMillis();
+        assertTrue(elapsedMillis < 650, "the check took " + elapsedMillis + " ms");
+    }
 
     @Test
     void testLinuxCommandUsesWholeSeconds() {

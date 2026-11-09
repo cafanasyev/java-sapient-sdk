@@ -41,12 +41,12 @@ public class InBandHealthCheck implements IHealthCheck {
 
     @Override
     public boolean check() {
-        // a frame arrived since the last check, so the link is already proven alive and
-        // there is no need to ping. Taking the permit is what stops it counting twice:
-        // the next check starts with nothing pending.
-        if (inbound.tryAcquire()) {
-            return true;
-        }
+        long deadline = System.nanoTime() + timeout.toNanos();
+
+        // a frame already waiting here is at least one interval old: the monitor runs a
+        // check only a full interval after the last inbound frame. It proves nothing about
+        // the link now, so only a frame that arrives after this point counts.
+        inbound.drainPermits();
 
         if (!writer.writePrefix(pingPrefix, timeout)) {
             // the write path was blocked for the whole timeout. Still alive if the peer
@@ -54,8 +54,10 @@ public class InBandHealthCheck implements IHealthCheck {
             return inbound.tryAcquire();
         }
 
+        // the write and the answer share one timeout, so a check never takes longer
         try {
-            return inbound.tryAcquire(timeout.toNanos(), TimeUnit.NANOSECONDS);
+            return inbound.tryAcquire(
+                    Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;

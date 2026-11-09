@@ -48,21 +48,34 @@ public class SystemPingRunner implements IPingRunner {
 
     @Override
     public boolean ping(String host, Duration timeout) {
+        return run(command(System.getProperty("os.name", ""), host, timeout), timeout);
+    }
+
+    /**
+     * Runs one ping command and reads its exit code.
+     *
+     * @param command the command and its arguments
+     * @param timeout how long the check may take
+     * @return {@code true} if the command exited with code 0 in time
+     */
+    boolean run(List<String> command, Duration timeout) {
+        String line = String.join(" ", command);
         Process process = null;
         try {
             process =
-                    new ProcessBuilder(command(System.getProperty("os.name", ""), host, timeout))
+                    new ProcessBuilder(command)
                             .redirectErrorStream(true)
                             .redirectOutput(ProcessBuilder.Redirect.DISCARD)
                             .start();
-            // the binary has its own timeout, but a hung process must not outlive the check
-            if (!process.waitFor(timeout.toMillis() + 500, TimeUnit.MILLISECONDS)) {
-                log.warn("ping to {} did not finish in time, killing it", host);
+            // the binary has its own timeout, but it is rounded up to whole seconds on Linux.
+            // A check may take at most its timeout, so a process still running then is killed
+            if (!process.waitFor(timeout.toNanos(), TimeUnit.NANOSECONDS)) {
+                log.warn("{} did not finish in time, killing it", line);
                 return false;
             }
             return process.exitValue() == 0;
         } catch (IOException e) {
-            log.error("failed to run ping for {}", host, e);
+            log.error("failed to run {}", line, e);
             return false;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
