@@ -9,6 +9,7 @@ import io.sapient.transport.ConnectionState;
 import io.sapient.transport.IClient;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -60,6 +61,9 @@ public class NodeDispatcher implements INodeDispatcher {
 
     // set when the client transitions to DISCONNECTED
     private final AtomicReference<Instant> disconnectedAt = new AtomicReference<>();
+    // number of the current connection, incremented on every DISCONNECTED. A status report sent
+    // on an older connection may have been lost with it (see LastSent)
+    private final AtomicLong connection = new AtomicLong(0);
     // incremented each time the client reconnects after a gap exceeding the grace period;
     // nodes compare against the epoch they captured at registration to detect server-side purge
     private final AtomicLong reregistrationEpoch = new AtomicLong(0);
@@ -87,6 +91,7 @@ public class NodeDispatcher implements INodeDispatcher {
 
     private void onClientStateChange(ConnectionState newState, Instant ts) {
         if (newState == ConnectionState.DISCONNECTED) {
+            connection.incrementAndGet();
             // capture only the first DISCONNECTED of an outage. Subsequent DISCONNECTED
             // events emitted from failed reconnect cycles must not overwrite it —
             // otherwise the measured gap shrinks to the latest retry window and the
@@ -111,6 +116,11 @@ public class NodeDispatcher implements INodeDispatcher {
      */
     long reregistrationEpoch() {
         return reregistrationEpoch.get();
+    }
+
+    /** Number of the current connection. It changes whenever the client loses the connection. */
+    long connection() {
+        return connection.get();
     }
 
     /** Worst-case detection delay of the transport in use. See {@code IClient}. */
@@ -319,48 +329,62 @@ public class NodeDispatcher implements INodeDispatcher {
     @Override
     public SapientMessage publish(Registration registration, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        return publish(SapientMessage.newBuilder().setRegistration(registration), nodeId, timeout);
+        // the server's view of the node starts over with a registration, so the registration
+        // leaves the node's last status report unknown
+        SapientMessage.Builder message = SapientMessage.newBuilder().setRegistration(registration);
+        return sendThroughNode(
+                nodeId, timeout, (last, remaining) -> publish(message, nodeId, remaining));
     }
 
     @Override
     public SapientMessage publish(StatusReport status, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
-        if (status.getReportId().isBlank()) {
-            status = status.toBuilder().setReportId(newReportId()).build();
-        }
+        StatusReport report =
+                status.getReportId().isBlank()
+                        ? status.toBuilder().setReportId(newReportId()).build()
+                        : status;
+        LastSent.Sender sender =
+                (last, remaining) -> {
+                    StatusReport filled = withInfo(report, last);
+                    return publish(
+                            SapientMessage.newBuilder().setStatusReport(filled), nodeId, remaining);
+                };
+        return sendThroughNode(nodeId, timeout, sender);
+    }
+
+    /**
+     * Sends a message that changes the status the server holds for the node: a status report or a
+     * registration. For a registered node the message goes through the node's {@link LastSent}, so
+     * the info is decided against the report the server got right before. An unknown node has no
+     * last report to compare with.
+     */
+    private SapientMessage sendThroughNode(UUID nodeId, Duration timeout, LastSent.Sender sender)
+            throws TimeoutException, InterruptedException {
         NodeWrapper node = findNode(nodeId);
-        StatusReport prev = node == null ? null : node.getLastStatusReport().get();
-        status = withInfo(status, prev);
-        SapientMessage message =
-                publish(SapientMessage.newBuilder().setStatusReport(status), nodeId, timeout);
-        if (node != null) {
-            // store only after the send returned without error. A failed send must keep the old
-            // value, or the next identical report goes out as INFO_UNCHANGED for content the server
-            // never received. compareAndSet loses to a concurrent publish of the same node instead
-            // of overwriting its newer value. See CHANGELOG.md §12.
-            node.getLastStatusReport().compareAndSet(prev, status);
+        if (node == null) {
+            return sender.send(Optional.empty(), timeout);
         }
-        return message;
+        return node.getLastSent().send(timeout, sender);
     }
 
     /**
      * Fills the mandatory {@code info} field of a status report. A goodbye always reports new
      * information, so it is set to INFO_NEW and never de-duplicated. For any other report the value
-     * is INFO_UNCHANGED when the content repeats {@code prev} and INFO_NEW otherwise. An explicit
+     * is INFO_UNCHANGED when the content repeats {@code last} and INFO_NEW otherwise. An explicit
      * INFO_UNCHANGED from the caller is kept as sent.
      *
      * <p>A node that leaves {@code info} unset gets a valid value instead of INFO_UNSPECIFIED.
      *
-     * @param prev last status report the node sent successfully, or {@code null} when there is none
-     *     — a fresh node, or an unknown (not registered) node. Then there is nothing to compare
-     *     with, so the content is new.
+     * @param last last status report the server is known to have from the node. Empty when it is
+     *     unknown: a fresh or unregistered node, a registration or a failed send since, or a lost
+     *     connection. Then there is nothing to compare with, so the content is new.
      */
-    private static StatusReport withInfo(StatusReport status, StatusReport prev) {
+    private static StatusReport withInfo(StatusReport status, Optional<StatusReport> last) {
         if (status.getSystem() == StatusReport.System.SYSTEM_GOODBYE) {
             return withInfo(status, StatusReport.Info.INFO_NEW);
         }
         if (status.getInfo() == StatusReport.Info.INFO_UNCHANGED) return status;
-        boolean unchanged = prev != null && contentEquals(prev, status);
+        boolean unchanged = last.isPresent() && contentEquals(last.get(), status);
         return withInfo(
                 status, unchanged ? StatusReport.Info.INFO_UNCHANGED : StatusReport.Info.INFO_NEW);
     }

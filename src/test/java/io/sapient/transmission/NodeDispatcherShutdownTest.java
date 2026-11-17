@@ -11,6 +11,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -203,11 +204,12 @@ class NodeDispatcherShutdownTest {
         Thread.sleep(CLOSE_HEADSTART.toMillis());
         release.countDown();
 
-        // the released node publishes the status report it was holding — wait for it, then
-        // for the close to finish, so the check below cannot run before either has happened
-        verify(client, timeout(AWAIT_MS)).publish(isLiveStatusReport(), any(Duration.class));
+        // the released node goes on to publish the status report it was holding. close() has
+        // interrupted its thread, so the report never reaches the client. close() returns only
+        // after the node is done, so the checks below run after both
         closer.join(AWAIT_MS);
 
+        verify(client, never()).publish(isLiveStatusReport(), any(Duration.class));
         assertFalse(
                 publishedAfterClose.get(), "no message may reach the client after it was closed");
     }

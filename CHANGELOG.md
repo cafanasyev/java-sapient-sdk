@@ -693,12 +693,88 @@ sent. Thrown during the write, the message still reaches the server unless the c
 A caller that retries may then deliver the message twice. The Python SDK behaves the same way:
 `writer.write()` puts the whole frame into the buffer, and the timeout cancels only `drain()`.
 
-The callers in this SDK handle the second meaning. `NodeWrapper` treats `TimeoutException` as
-"try again on the next cycle". After a timed-out status report, `lastStatusReport` keeps the old
-value. A repeat of the timed-out content therefore goes out as `INFO_NEW`, which is safe even if
-the first copy arrived.
+`NodeWrapper` treats `TimeoutException` as "try again on the next cycle". One consequence was
+missed here. After a timed-out status report, the next report was still compared with the report
+before it. If the content went back to that older report, it went out as `INFO_UNCHANGED` while
+the server held the timed-out one. §16 fixes this: a failed publish now leaves the last report
+unknown.
 
 Known limit: with `NETCAT` or `ICMP` checks, a server that stops reading but still accepts TCP
 connections is never declared dead. The write thread stays stuck, and every publish times out.
 The old code had the same limit. `ECHO` and `PINGPONG` catch this case: the pings cannot get
 through, and the monitor drops the connection after `failureThreshold` failed checks.
+
+## 16 — Decide StatusReport.Info in the order the server receives the reports
+
+### Problem
+
+`INFO_UNCHANGED` tells the server that nothing changed since the previous report. `NodeDispatcher`
+decided it against `NodeWrapper.lastStatusReport` in four separate steps: read the last report,
+compare, send, store with `compareAndSet`. The node lifecycle and an external call can publish a
+status report of the same node at the same time, and nothing kept the four steps of one publish
+together. In each example below the server last held OK:
+
+- **A later report overtook an earlier one.** The lifecycle compared OK with OK and decided
+  `INFO_UNCHANGED`. Before that report reached the server, an external FAULT went out as
+  `INFO_NEW`. The server then got OK marked unchanged right after FAULT, and kept FAULT.
+- **The store kept the wrong report.** DEGRADED and FAULT both compared with OK and went out in
+  that order. DEGRADED was stored first, so the `compareAndSet` of FAULT failed. The node
+  remembered DEGRADED while the server held FAULT, and the next DEGRADED went out as unchanged.
+- **A timed-out report still arrived.** Since §15, a publish that times out during the write still
+  delivers the frame. FAULT timed out but arrived, and the node kept OK as its last report. The
+  next OK went out as unchanged.
+
+Two more events left the remembered report wrong:
+
+- **Registration.** After a re-registration the server starts over, but the first status report
+  was still compared with the report from before.
+- **Reconnect.** A report written just before the connection dropped may never have arrived. The
+  first report after the reconnect was still compared with it.
+
+### Decision
+
+- **The last report is the lock.** `LastSent` keeps the last report the server is known to have
+  as the only element of a queue of one. A publish takes the report out, decides the info against
+  it, sends, and puts back what it sent. While the report is out, no other status report of the
+  node can be decided or sent. The server therefore gets a node's reports in the order their info
+  was decided. `SocketClient.connectionSlot` works the same way: the connection itself is the lock.
+
+- **`LastSent.send` is the only way to the report, and it always puts back exactly one value.**
+  The value is the report that was sent, or "unknown" when the send threw. Every failure leaves
+  "unknown" without a rule of its own: a timeout, an interrupt, a stopped client, an unchecked
+  exception. After "unknown" the next report goes out as `INFO_NEW`, which is always safe.
+
+- **The wait for the report counts against the caller's timeout.** A report that waits behind
+  another report of the same node gives up at its own deadline and sends nothing. Each node has
+  its own `LastSent`, so reports of different nodes do not wait for each other here.
+
+- **A registration goes through the same path.** It carries no status report, so it leaves the
+  last report unknown.
+
+- **A report counts only on the connection it was sent on.** `NodeDispatcher` numbers the
+  connections and moves to the next number on every `DISCONNECTED`. A report from an older
+  connection is unknown.
+
+- **Removed:** `NodeWrapper.lastStatusReport`, the `compareAndSet`, and the reset after a goodbye.
+  A goodbye now simply becomes the last report. `system` takes part in the comparison, so a
+  goodbye never matches a normal report (§12).
+
+### Result
+
+`StatusReportInfoTest` covers every case above through the public API. Only the transport is
+faked: it records each report as it reaches the server, can hold a report back, and can deliver a
+report and still fail its publish. Two of its tests guard the design: reports of different nodes
+do not wait for each other, and the report after a goodbye goes out as `INFO_NEW`. The white-box
+test `lastStatusReportClearedAfterGoodbye` went away with the field.
+
+Cost: status reports and registrations of one node go out one at a time. Each one waits for the
+previous one at most until its own deadline.
+
+Behaviour change: a node thread interrupted by `close()` can no longer publish. `LastSent` waits
+in an interruptible `poll`, so the publish throws `InterruptedException` before it reaches the
+client. With `SocketClient` the outcome was already the same, because `SocketClient` also waits in
+an interruptible `poll`. `NodeDispatcherShutdownTest.nodeDoesNotPublishAfterClientClosed` now
+expects the late status report not to reach the client at all.
+
+The Python SDK has the same three races: an `await` sits between reading `previous` and storing
+it. It is not changed here.

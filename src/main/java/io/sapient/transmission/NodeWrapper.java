@@ -13,7 +13,6 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import lombok.Getter;
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
@@ -32,11 +31,10 @@ class NodeWrapper implements AutoCloseable {
     @Getter private final AtomicBoolean registered = new AtomicBoolean(false);
 
     /**
-     * Last status report that reached the transport without an error. The INFO_UNCHANGED
-     * de-duplication compares against it, so it must hold only content the server really received.
-     * A failed send keeps the old value. See CHANGELOG.md §12.
+     * Last status report the server is known to have from this node. Status reports and
+     * registrations of the node go through it one at a time. See CHANGELOG.md §16.
      */
-    @Getter private final AtomicReference<StatusReport> lastStatusReport = new AtomicReference<>();
+    @Getter private final LastSent lastSent;
 
     @Getter private final BlockingQueue<RegistrationAck> ackQueue = new ArrayBlockingQueue<>(1);
 
@@ -52,6 +50,7 @@ class NodeWrapper implements AutoCloseable {
         this.node = node;
         this.dispatcher = dispatcher;
         this.config = config;
+        this.lastSent = new LastSent(dispatcher::connection);
         this.thread = Thread.ofVirtual().name("node-" + node.getNodeId()).start(this::run);
     }
 
@@ -96,7 +95,6 @@ class NodeWrapper implements AutoCloseable {
                     log.error("goodbye publish timeout for node: {}", node.getNodeId(), e);
                 }
             }
-            lastStatusReport.set(null);
         }
     }
 

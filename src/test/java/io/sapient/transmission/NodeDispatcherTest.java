@@ -3,7 +3,6 @@ package io.sapient.transmission;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -442,31 +441,6 @@ class NodeDispatcherTest {
                     StatusReport.StatusType.STATUS_TYPE_INTERNAL_FAULT,
                     goodbyeStatus.getStatusType());
             assertEquals("sensor malfunction", goodbyeStatus.getStatusValue());
-        }
-    }
-
-    @Test
-    @Timeout(3)
-    void lastStatusReportClearedAfterGoodbye() throws Exception {
-        try (var s = setup(50)) {
-            s.online.set(true);
-            s.dispatcher.register(s.node);
-
-            verify(s.dispatcher, timeout(1000))
-                    .publish(any(Registration.class), eq(s.nodeId), any(Duration.class));
-
-            sendAck(s.onMessage, s.nodeId, true);
-
-            verify(s.dispatcher, timeout(1000).atLeastOnce())
-                    .publish(any(StatusReport.class), eq(s.nodeId), any(Duration.class));
-
-            s.online.set(false);
-
-            verify(s.dispatcher, timeout(1000))
-                    .publish(isGoodbye(), eq(s.nodeId), any(Duration.class));
-            Thread.sleep(50);
-
-            assertNull(s.dispatcher.findNode(s.nodeId).getLastStatusReport().get());
         }
     }
 
