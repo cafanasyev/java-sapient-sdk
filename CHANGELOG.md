@@ -778,3 +778,31 @@ expects the late status report not to reach the client at all.
 
 The Python SDK has the same three races: an `await` sits between reading `previous` and storing
 it. It is not changed here.
+
+## 17 — Auto-populate alert_id in Alert when empty
+
+### Problem
+
+`alert_id` is a mandatory ULID on `Alert`, marked in the proto exactly like `report_id`: "ULID for
+the message". §8 fills `report_id` for status and detection reports, but alerts went out as the
+node handed them over. A node that left `alert_id` empty sent a message without its mandatory
+field. The server answers an alert with an `AlertAck` that carries the same `alert_id`, so an
+alert without an id also has no way to be matched with its ack.
+
+The test harness filled the gap on its own side. It generated one `alert_id` per alert file and
+reused it on every send until the files were reloaded.
+
+### Decision
+
+- **Generate a ULID at publish time when `alert_id` is empty**, the same rule as §8. An
+  `alert_id` the node already set goes out unchanged, so the node can send the same alert again,
+  for example with `ALERT_STATUS_CLEAR`.
+
+- **The caller learns the generated id from the returned message.** `publish` returns the message
+  as sent, so the node can match the `AlertAck` that comes back.
+
+### Result
+
+Every published `Alert` carries a valid `alert_id`. Nodes that set their own keep full control.
+
+The Python SDK does not fill `alert_id` yet.

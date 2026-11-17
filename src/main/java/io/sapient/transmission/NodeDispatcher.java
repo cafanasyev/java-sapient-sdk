@@ -341,7 +341,7 @@ public class NodeDispatcher implements INodeDispatcher {
             throws TimeoutException, InterruptedException {
         StatusReport report =
                 status.getReportId().isBlank()
-                        ? status.toBuilder().setReportId(newReportId()).build()
+                        ? status.toBuilder().setReportId(newUlid()).build()
                         : status;
         LastSent.Sender sender =
                 (last, remaining) -> {
@@ -416,6 +416,9 @@ public class NodeDispatcher implements INodeDispatcher {
     @Override
     public SapientMessage publish(Alert alert, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
+        if (alert.getAlertId().isBlank()) {
+            alert = alert.toBuilder().setAlertId(newUlid()).build();
+        }
         return publish(SapientMessage.newBuilder().setAlert(alert), nodeId, timeout);
     }
 
@@ -423,16 +426,17 @@ public class NodeDispatcher implements INodeDispatcher {
     public SapientMessage publish(DetectionReport detection, UUID nodeId, Duration timeout)
             throws TimeoutException, InterruptedException {
         if (detection.getReportId().isBlank()) {
-            detection = detection.toBuilder().setReportId(newReportId()).build();
+            detection = detection.toBuilder().setReportId(newUlid()).build();
         }
         return publish(SapientMessage.newBuilder().setDetectionReport(detection), nodeId, timeout);
     }
 
     /**
-     * Generates a monotonic ULID for the mandatory {@code report_id} field. Monotonic generation
-     * keeps ids time-ordered even when several are created within the same millisecond.
+     * Generates a monotonic ULID for the mandatory {@code report_id} and {@code alert_id} fields.
+     * Monotonic generation keeps ids time-ordered even when several are created within the same
+     * millisecond.
      */
-    private static String newReportId() {
+    private static String newUlid() {
         return UlidCreator.getMonotonicUlid().toString();
     }
 

@@ -783,6 +783,39 @@ class NodeDispatcherTest {
 
     @Test
     @Timeout(3)
+    void publishAlertGeneratesAlertIdWhenEmpty() throws Exception {
+        IClient client = mockClient();
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID));
+        UUID nodeId = UUID.randomUUID();
+
+        dispatcher.publish(Alert.getDefaultInstance(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        String alertId = msg.getAlert().getAlertId();
+        assertTrue(Ulid.isValid(alertId), "alert_id should be a valid ULID: " + alertId);
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
+    void publishAlertKeepsExistingAlertId() throws Exception {
+        IClient client = mockClient();
+        NodeDispatcher dispatcher =
+                new NodeDispatcher(client, NodeDispatcherConfig.defaults(FUSION_NODE_ID));
+        UUID nodeId = UUID.randomUUID();
+
+        String alertId = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
+        dispatcher.publish(
+                Alert.newBuilder().setAlertId(alertId).build(), nodeId, Duration.ofSeconds(1));
+
+        SapientMessage msg = capturePublished(client);
+        assertEquals(alertId, msg.getAlert().getAlertId());
+        dispatcher.close();
+    }
+
+    @Test
+    @Timeout(3)
     void logBodyRendersMessageAsJson() {
         Logger log = mock(Logger.class);
         SapientMessage message =

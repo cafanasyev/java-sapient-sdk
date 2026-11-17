@@ -161,6 +161,7 @@ Everything `NodeDispatcher.register(node)` automates for you — you don't need 
 | Auto-populate `StatusReport.Info` if unset | Fills the mandatory field before sending: `INFO_UNCHANGED` when the content repeats the previous report, `INFO_NEW` otherwise. A GOOD BYE report always gets `INFO_NEW`. An explicit `INFO_UNCHANGED` from the node is kept as sent. | ✅ | ✅ |
 | Auto-populate `StatusReport.ReportId` if blank | Fills in a fresh ULID before sending, so callers don't need to mint one themselves. | ✅ | ✅ |
 | Auto-populate `DetectionReport.ReportId` if blank | Fills in a fresh ULID before sending, so callers don't need to mint one themselves. | ✅ | ✅ |
+| Auto-populate `Alert.AlertId` if blank | Fills in a fresh ULID before sending. An `alert_id` set by the node goes out unchanged, so the node can send the same alert again, for example to clear it. | ✅ | ❌ |
 
 ### Logging
 

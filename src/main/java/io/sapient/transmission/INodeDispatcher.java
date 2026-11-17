@@ -78,7 +78,9 @@ public interface INodeDispatcher extends AutoCloseable {
             throws TimeoutException, InterruptedException;
 
     /**
-     * Publishes an {@link Alert} message for the given node.
+     * Publishes an {@link Alert} message for the given node. An empty {@code alert_id} is filled
+     * with a new ULID. An {@code alert_id} set by the caller goes out unchanged, so the caller can
+     * send the same alert again, for example to clear it.
      *
      * @param alert the alert message
      * @param nodeId the source node identifier
