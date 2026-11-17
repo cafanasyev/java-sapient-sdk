@@ -258,7 +258,11 @@ public class NodeDispatcher implements INodeDispatcher {
         try {
             NodeWrapper w = offlineNodes.remove(id);
             if (w != null) onlineNodes.put(id, w);
-            if (!onlineNodes.isEmpty() && clientRunning.compareAndSet(false, true)) {
+            // during shutdown close() is about to close the client, so a node that comes online
+            // now must not start it again
+            if (!onlineNodes.isEmpty()
+                    && !closing.get()
+                    && clientRunning.compareAndSet(false, true)) {
                 client.start();
             }
         } finally {

@@ -806,3 +806,40 @@ reused it on every send until the files were reloaded.
 Every published `Alert` carries a valid `alert_id`. Nodes that set their own keep full control.
 
 The Python SDK does not fill `alert_id` yet.
+
+## 18 — A node stopped during its online check no longer starts the client
+
+### Problem
+
+`NodeWrapper.waitUntilOnline()` looped while the node was offline and its thread was not
+interrupted. So it returned normally in two cases: the node came online, or a stop arrived while
+`isOnline()` was running. `_run()` took every normal return to mean "online" and called
+`onNodeOnline()`. An offline node that `close()` was stopping reported itself as online, and
+`onNodeOnline()` started the client again. During shutdown the client could open a new
+connection to the server, which `close()` then closed again.
+
+The window is the time `isOnline()` takes. In the tests it is a few microseconds, so
+`clientClosedExactlyOnceWhenNodesGoOfflineThenDispatcherCloses` failed 2 to 3 times in 900 runs.
+A node whose `isOnline()` pings a device for 200 ms, with the default 5s check interval, leaves a
+window of 200 ms in every 5.2 s.
+
+### Decision
+
+- **`waitUntilOnline()` returns only once the node is online.** The interrupt is no longer part
+  of the loop condition. A stop always surfaces as `InterruptedException`, because `Thread.sleep`
+  throws at once for a thread that is already interrupted.
+
+- **A closing dispatcher never starts the client.** `onNodeOnline()` now checks `closing`, as
+  `onNodeOffline()` already did. This covers a node that really comes online while `close()`
+  runs.
+
+### Result
+
+`NodeDispatcherShutdownTest.nodeCheckedDuringShutdownDoesNotStartTheClient` stops a node in the
+middle of a slow online check, once for a node that stays offline and once for a node that comes
+online. Both cases failed every time before the change. Afterwards
+`clientClosedExactlyOnceWhenNodesGoOfflineThenDispatcherCloses` passed 900 runs in a row.
+
+`nodeCheckedDuringShutdownStopsWithoutWaitingForTheNextCheck` makes sure the stop does not wait
+for the next check. With a one-minute check interval, `close()` must return within 4 s. A
+`waitUntilOnline()` that swallows the interrupt and keeps waiting fails this test.

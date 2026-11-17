@@ -6,6 +6,7 @@ import static io.sapient.transmission.NodeDispatcherTest.captureSubscription;
 import static io.sapient.transmission.NodeDispatcherTest.mockNode;
 import static io.sapient.transmission.NodeDispatcherTest.sendAck;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -23,11 +24,14 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.stubbing.Answer;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
@@ -40,8 +44,12 @@ class NodeDispatcherShutdownTest {
     private static final Duration CLOSE_HEADSTART = Duration.ofSeconds(1);
 
     private static NodeDispatcherConfig config() {
+        return config(Duration.ofMillis(10));
+    }
+
+    private static NodeDispatcherConfig config(Duration onlineCheckInterval) {
         return new NodeDispatcherConfig(
-                Duration.ofMillis(10),
+                onlineCheckInterval,
                 Duration.ofSeconds(5),
                 Duration.ofSeconds(5),
                 Duration.ofMinutes(2),
@@ -142,6 +150,52 @@ class NodeDispatcherShutdownTest {
 
         dispatcher.close();
         verify(client, times(1)).close();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @Timeout(20)
+    void nodeCheckedDuringShutdownDoesNotStartTheClient(boolean online) throws Exception {
+        IClient client = mockClient();
+        CountDownLatch checking = new CountDownLatch(1);
+        NodeDispatcher dispatcher = new NodeDispatcher(client, config());
+        dispatcher.register(nodeCheckedDuringShutdown(online, checking));
+        assertTrue(checking.await(AWAIT_MS, TimeUnit.MILLISECONDS));
+
+        dispatcher.close();
+
+        verify(client, never()).start();
+    }
+
+    @Test
+    @Timeout(20)
+    void nodeCheckedDuringShutdownStopsWithoutWaitingForTheNextCheck() throws Exception {
+        // the next check is a minute away, and close() gives up on a node thread after 5s
+        CountDownLatch checking = new CountDownLatch(1);
+        NodeDispatcher dispatcher = new NodeDispatcher(mockClient(), config(Duration.ofMinutes(1)));
+        dispatcher.register(nodeCheckedDuringShutdown(false, checking));
+        assertTrue(checking.await(AWAIT_MS, TimeUnit.MILLISECONDS));
+
+        assertTimeoutPreemptively(Duration.ofSeconds(4), dispatcher::close);
+    }
+
+    /**
+     * A node whose online check is still running when close() stops it, like a slow device ping.
+     * The check returns {@code online} once the stop has arrived.
+     */
+    private static INode nodeCheckedDuringShutdown(boolean online, CountDownLatch checking) {
+        INode node = mock(INode.class);
+        when(node.getNodeId()).thenReturn(UUID.randomUUID());
+        Answer<Boolean> slowCheck =
+                inv -> {
+                    checking.countDown();
+                    while (!Thread.currentThread().isInterrupted()) {
+                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                    }
+                    return online;
+                };
+        when(node.isOnline()).thenAnswer(slowCheck);
+        return node;
     }
 
     @Test

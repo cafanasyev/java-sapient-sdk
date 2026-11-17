@@ -184,8 +184,16 @@ class NodeWrapper implements AutoCloseable {
         }
     }
 
+    /**
+     * Returns only once the node is online. A stop does not wait for the next check: it ends the
+     * method with {@link InterruptedException}.
+     *
+     * <p>{@link Thread#sleep} throws {@link InterruptedException} at once when the current thread
+     * is already interrupted. So a stop that arrives during {@code isOnline()}, while the thread is
+     * not sleeping, ends the method as soon as {@code isOnline()} returns.
+     */
     private void waitUntilOnline() throws InterruptedException {
-        while (!node.isOnline() && !Thread.currentThread().isInterrupted()) {
+        while (!node.isOnline()) {
             Thread.sleep(config.onlineCheckInterval());
         }
     }
