@@ -1,146 +1,178 @@
 package io.sapient.transmission;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport.Info.INFO_UNCHANGED;
+import static uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport.System.SYSTEM_GOODBYE;
 
-import io.sapient.transport.ConnectionState;
-import io.sapient.transport.IClient;
+import io.sapient.testing.Async;
+import io.sapient.testing.FakeEdgeNode;
+import io.sapient.testing.FakeFusionNode;
+import io.sapient.testing.Held;
 import java.time.Duration;
-import java.time.Instant;
-import java.util.List;
-import java.util.Locale;
-import java.util.Queue;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Future;
-import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeoutException;
-import java.util.function.BiConsumer;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
-import org.mockito.stubbing.Answer;
-import uk.gov.dstl.sapientmsg.bsiflex335v2.Registration;
-import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
 import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 
 /**
  * An UNCHANGED status report tells the server that nothing changed since the previous report. So an
- * UNCHANGED report must repeat the last report the server received. The tests check this rule when
- * reports of one node race, and after events that leave the server's last report unknown.
+ * UNCHANGED report must repeat the last report the server received. The tests check this rule for
+ * single reports, when reports of one node race, and after events that leave the server's last
+ * report unknown.
  */
-@Timeout(10)
 @Execution(ExecutionMode.CONCURRENT)
 class StatusReportInfoTest {
 
-    private static final UUID NODE_ID = UUID.randomUUID();
-    private static final Duration TIMEOUT = Duration.ofSeconds(5);
-
-    private Server server;
-    private NodeDispatcher dispatcher;
-
-    @BeforeEach
-    void setUp() throws Exception {
-        server = new Server();
-        dispatcher =
-                new NodeDispatcher(server.client, NodeDispatcherConfig.defaults(UUID.randomUUID()));
-        register(NODE_ID);
-    }
+    private final FakeFusionNode server = new FakeFusionNode();
+    // offline: the node's own lifecycle sends nothing, only the test does
+    private final FakeEdgeNode node = FakeEdgeNode.builder("n1").withOfflineStart().build();
+    private final NodeDispatcher dispatcher = server.connect(node);
 
     @AfterEach
-    void tearDown() {
+    void close() {
         dispatcher.close();
+    }
+
+    @ParameterizedTest
+    @EnumSource(names = {"INFO_NEW", "INFO_UNSPECIFIED"})
+    void firstReportIsNew(StatusReport.Info info) throws Exception {
+        node.sendStatusReport(report -> report.setInfo(info));
+
+        server.expect("n1 status OK new");
+    }
+
+    @ParameterizedTest
+    @EnumSource(names = {"INFO_NEW", "INFO_UNSPECIFIED"})
+    void repeatedReportIsUnchanged(StatusReport.Info info) throws Exception {
+        node.sendStatusReport(report -> report.setInfo(info));
+        node.sendStatusReport(report -> report.setInfo(info));
+
+        server.expect("n1 status OK new", "n1 status OK unchanged");
+    }
+
+    @ParameterizedTest
+    @EnumSource(names = {"INFO_NEW", "INFO_UNSPECIFIED"})
+    void changedReportIsNew(StatusReport.Info info) throws Exception {
+        node.sendStatusReport(report -> report.setInfo(info));
+        node.sendStatusReport(report -> report.setMode("FAULT").setInfo(info));
+
+        server.expect("n1 status OK new", "n1 status FAULT new");
+    }
+
+    @Test
+    void explicitUnchangedIsKept() throws Exception {
+        node.sendStatusReport(report -> report.setInfo(INFO_UNCHANGED));
+
+        server.expect("n1 status OK unchanged");
+    }
+
+    @Test
+    void explicitUnchangedReportIsTheNextBaseline() throws Exception {
+        node.sendStatusReport(report -> report.setInfo(INFO_UNCHANGED));
+        node.sendStatusReport();
+
+        server.expect("n1 status OK unchanged", "n1 status OK unchanged");
+    }
+
+    @Test
+    void reportOfAnUnregisteredNodeIsAlwaysNew() throws Exception {
+        UUID stranger = UUID.randomUUID();
+        StatusReport report = node.asNode().getStatusReport();
+
+        dispatcher.publish(report, stranger, Duration.ofSeconds(5));
+        dispatcher.publish(report, stranger, Duration.ofSeconds(5));
+
+        String name = stranger.toString().substring(0, 8);
+        server.expect(name + " status OK new", name + " status OK new");
     }
 
     @Test
     void laterReportDoesNotOvertakeEarlierOne() throws Exception {
-        publish("OK");
+        node.sendStatusReport();
 
-        Hold ok = server.holdNext();
-        Future<?> okSent = publishInBackground("OK");
+        Held ok = server.holdNext();
+        var okSent = Async.run(node::sendStatusReport);
         ok.awaitArrival();
-        Future<?> faultSent = publishInBackground("FAULT");
-        Thread.sleep(200); // FAULT gets 200 ms to reach the server ahead of the held OK
+        var faultSent = Async.run(() -> node.sendStatusReport(report -> report.setMode("FAULT")));
+        faultSent.awaitParkedOrDone(); // FAULT either reaches the server first or waits for OK
         ok.release();
-        okSent.get();
-        faultSent.get();
+        Async.joinAll(okSent, faultSent);
 
-        assertEquals(List.of("OK new", "OK unchanged", "FAULT new"), server.received);
+        server.expect("n1 status OK new", "n1 status OK unchanged", "n1 status FAULT new");
     }
 
     @Test
     void nextReportIsComparedWithLastOneSent() throws Exception {
-        publish("OK");
+        node.sendStatusReport();
 
-        Hold degraded = server.holdNext();
-        Hold fault = server.holdNext();
-        Future<?> degradedSent = publishInBackground("DEGRADED");
+        Held degraded = server.holdNext();
+        Held fault = server.holdNext();
+        var degradedSent = Async.run(() -> node.sendStatusReport(r -> r.setMode("DEGRADED")));
         degraded.awaitArrival();
-        Future<?> faultSent = publishInBackground("FAULT");
-        Thread.sleep(200); // FAULT gets 200 ms to get held as well
+        var faultSent = Async.run(() -> node.sendStatusReport(r -> r.setMode("FAULT")));
+        faultSent.awaitParkedOrDone(); // FAULT is held as well, or waits for DEGRADED
         degraded.release();
-        degradedSent.get();
+        degradedSent.join();
         fault.release();
-        faultSent.get();
-        publish("DEGRADED");
+        faultSent.join();
+        node.sendStatusReport(report -> report.setMode("DEGRADED"));
 
-        assertEquals(
-                List.of("OK new", "DEGRADED new", "FAULT new", "DEGRADED new"), server.received);
+        server.expect(
+                "n1 status OK new",
+                "n1 status DEGRADED new",
+                "n1 status FAULT new",
+                "n1 status DEGRADED new");
     }
 
     @Test
     void reportWaitingForAnotherGivesUpAtItsTimeout() throws Exception {
-        Hold fault = server.holdNext();
-        Future<?> faultSent = publishInBackground("FAULT");
+        Held fault = server.holdNext();
+        var faultSent = Async.run(() -> node.sendStatusReport(r -> r.setMode("FAULT")));
         fault.awaitArrival();
 
+        StatusReport ok = node.asNode().getStatusReport();
         assertThrows(
                 TimeoutException.class,
-                () -> dispatcher.publish(report("OK"), NODE_ID, Duration.ofMillis(200)));
+                () -> dispatcher.publish(ok, node.id(), Duration.ofMillis(200)));
         fault.release();
-        faultSent.get();
-        publish("OK");
+        faultSent.join();
+        node.sendStatusReport();
 
-        assertEquals(List.of("FAULT new", "OK new"), server.received);
+        server.expect("n1 status FAULT new", "n1 status OK new");
     }
 
     @Test
     void reportsOfDifferentNodesDoNotWaitForEachOther() throws Exception {
-        UUID otherNode = UUID.randomUUID();
-        register(otherNode);
+        var other = FakeEdgeNode.builder("n2").withOfflineStart().build();
+        server.register(dispatcher, other);
 
-        Hold fault = server.holdNext();
-        Future<?> faultSent = publishInBackground("FAULT");
+        Held fault = server.holdNext();
+        var faultSent = Async.run(() -> node.sendStatusReport(r -> r.setMode("FAULT")));
         fault.awaitArrival();
-        dispatcher.publish(report("OK"), otherNode, Duration.ofMillis(200));
+        dispatcher.publish(other.asNode().getStatusReport(), other.id(), Duration.ofMillis(200));
         fault.release();
-        faultSent.get();
+        faultSent.join();
 
-        assertEquals(List.of("OK new", "FAULT new"), server.received);
+        server.expect("n2 status OK new", "n1 status FAULT new");
     }
 
     @ParameterizedTest
     @MethodSource("failures")
     void reportAfterFailedPublishIsNew(Exception failure) throws Exception {
-        publish("OK");
+        node.sendStatusReport();
 
         server.deliverNextThenFail(failure);
-        assertThrows(failure.getClass(), () -> publish("FAULT"));
-        publish("OK");
+        assertThrows(failure.getClass(), () -> node.sendStatusReport(r -> r.setMode("FAULT")));
+        node.sendStatusReport();
 
-        assertEquals(List.of("OK new", "FAULT new", "OK new"), server.received);
+        server.expect("n1 status OK new", "n1 status FAULT new", "n1 status OK new");
     }
 
     /** Failures after which the dispatcher cannot know whether the server got the report. */
@@ -150,135 +182,40 @@ class StatusReportInfoTest {
     }
 
     @Test
-    void reportAfterGoodbyeIsNew() throws Exception {
-        publish("OK");
-        StatusReport goodbye =
-                report("OK").toBuilder().setSystem(StatusReport.System.SYSTEM_GOODBYE).build();
-        dispatcher.publish(goodbye, NODE_ID, TIMEOUT);
-        publish("OK");
+    void reportAfterLostPublishIsNew() throws Exception {
+        node.sendStatusReport();
 
-        assertEquals(List.of("OK new", "goodbye new", "OK new"), server.received);
+        server.failNext(new TimeoutException());
+        assertThrows(TimeoutException.class, node::sendStatusReport);
+        node.sendStatusReport();
+
+        server.expect("n1 status OK new", "n1 status OK new");
+    }
+
+    @Test
+    void goodbyeIsNewAndSoIsTheReportAfterIt() throws Exception {
+        node.sendStatusReport();
+        node.sendStatusReport(report -> report.setSystem(SYSTEM_GOODBYE));
+        node.sendStatusReport();
+
+        server.expect("n1 status OK new", "n1 goodbye new", "n1 status OK new");
     }
 
     @Test
     void reportAfterRegistrationIsNew() throws Exception {
-        publish("OK");
-        dispatcher.publish(Registration.getDefaultInstance(), NODE_ID, TIMEOUT);
-        publish("OK");
+        node.sendStatusReport();
+        node.sendRegistration();
+        node.sendStatusReport();
 
-        assertEquals(List.of("OK new", "registration", "OK new"), server.received);
+        server.expect("n1 status OK new", "n1 registration", "n1 status OK new");
     }
 
     @Test
     void reportAfterReconnectIsNew() throws Exception {
-        publish("OK");
-        server.reconnect();
-        publish("OK");
+        node.sendStatusReport();
+        server.outage(Duration.ofSeconds(1));
+        node.sendStatusReport();
 
-        assertEquals(List.of("OK new", "OK new"), server.received);
-    }
-
-    /** Registers an offline node: its own lifecycle sends nothing, only the test publishes. */
-    private void register(UUID nodeId) {
-        INode node = mock(INode.class);
-        when(node.getNodeId()).thenReturn(nodeId);
-        dispatcher.register(node);
-    }
-
-    private static StatusReport report(String mode) {
-        return StatusReport.newBuilder().setMode(mode).build();
-    }
-
-    private void publish(String mode) throws Exception {
-        dispatcher.publish(report(mode), NODE_ID, TIMEOUT);
-    }
-
-    private Future<?> publishInBackground(String mode) {
-        FutureTask<Void> task =
-                new FutureTask<>(
-                        () -> {
-                            publish(mode);
-                            return null;
-                        });
-        Thread.startVirtualThread(task);
-        return task;
-    }
-
-    /** A report the server keeps back until the test releases it. */
-    private record Hold(CountDownLatch arrived, CountDownLatch released) {
-        void awaitArrival() throws InterruptedException {
-            arrived.await();
-        }
-
-        void release() {
-            released.countDown();
-        }
-    }
-
-    /** The fusion node behind the client. Writes down each message it receives, like "OK new". */
-    private static final class Server {
-        final IClient client = mock(IClient.class);
-        final List<String> received = new CopyOnWriteArrayList<>();
-        private final Queue<Answer<Void>> upcoming = new ConcurrentLinkedQueue<>();
-        private volatile BiConsumer<ConnectionState, Instant> stateListener;
-
-        private final Answer<Void> receive =
-                call -> {
-                    received.add(describe(call.getArgument(0)));
-                    return null;
-                };
-
-        Server() throws Exception {
-            Answer<Void> publish =
-                    call -> {
-                        Answer<Void> scripted = upcoming.poll();
-                        return scripted != null ? scripted.answer(call) : receive.answer(call);
-                    };
-            Answer<Void> listen =
-                    call -> {
-                        stateListener = call.getArgument(0);
-                        return null;
-                    };
-            doAnswer(publish).when(client).publish(any(), any());
-            doAnswer(listen).when(client).addStateChangeListener(any());
-            when(client.connectionLossDetectionDelay()).thenReturn(Duration.ZERO);
-        }
-
-        /** Keeps the next report from reaching the server until the hold is released. */
-        Hold holdNext() {
-            Hold hold = new Hold(new CountDownLatch(1), new CountDownLatch(1));
-            upcoming.add(
-                    call -> {
-                        hold.arrived().countDown();
-                        hold.released().await();
-                        return receive.answer(call);
-                    });
-            return hold;
-        }
-
-        /** Lets the next report reach the server, then fails its publish anyway. */
-        void deliverNextThenFail(Exception failure) {
-            upcoming.add(
-                    call -> {
-                        receive.answer(call);
-                        throw failure;
-                    });
-        }
-
-        /** Drops the connection and brings it back, the way the client reports it. */
-        void reconnect() {
-            stateListener.accept(ConnectionState.DISCONNECTED, Instant.now());
-            stateListener.accept(ConnectionState.CONNECTED, Instant.now());
-        }
-
-        private static String describe(SapientMessage message) {
-            if (message.hasRegistration()) {
-                return "registration";
-            }
-            StatusReport report = message.getStatusReport();
-            boolean goodbye = report.getSystem() == StatusReport.System.SYSTEM_GOODBYE;
-            String info = report.getInfo().name().replace("INFO_", "").toLowerCase(Locale.ROOT);
-            return (goodbye ? "goodbye" : report.getMode()) + " " + info;
-        }
+        server.expect("n1 status OK new", "n1 status OK new");
     }
 }

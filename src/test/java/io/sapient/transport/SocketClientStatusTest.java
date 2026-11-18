@@ -3,44 +3,19 @@ package io.sapient.transport;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
 
-import java.io.IOException;
-import java.net.ServerSocket;
-import java.net.Socket;
+import io.sapient.testing.FakeFusionNode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.BiConsumer;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 
 @Execution(ExecutionMode.CONCURRENT)
 class SocketClientStatusTest {
-
-    private static ISocketProvider plainProvider(int port) {
-        return new ISocketProvider() {
-            @Override
-            public Socket get() throws IOException {
-                return new Socket("localhost", port);
-            }
-
-            @Override
-            public String host() {
-                return "localhost";
-            }
-
-            @Override
-            public int port() {
-                return port;
-            }
-        };
-    }
 
     @Test
     void testInitialStateIsDisconnected() {
@@ -71,44 +46,33 @@ class SocketClientStatusTest {
     }
 
     @Test
-    @Timeout(5)
     void testStateTransitionsOnConnect() throws Exception {
-        var server = new TestServer();
-        Thread.startVirtualThread(server);
-        var states = new LinkedBlockingQueue<ConnectionState>();
-        var client = spy(new SocketClient(plainProvider(server.getLocalPort())));
-        doReturn(true).when(client).probeReachable(any(Duration.class));
-        client.addStateChangeListener((s, ts) -> states.add(s));
+        try (var server = new FakeFusionNode();
+                var client = new SocketClient(server.sockets())) {
+            var states = new LinkedBlockingQueue<ConnectionState>();
+            client.addStateChangeListener((s, ts) -> states.add(s));
 
-        try (server;
-                client) {
             client.start();
 
-            assertEquals(ConnectionState.CONNECTING, states.poll(2, SECONDS));
-            assertEquals(ConnectionState.CONNECTED, states.poll(2, SECONDS));
+            assertEquals(ConnectionState.CONNECTING, states.take());
+            assertEquals(ConnectionState.CONNECTED, states.take());
             assertTrue(client.isConnected());
         }
     }
 
     @Test
-    @Timeout(5)
     void testStateBecomesDisconnectedAfterServerClose() throws Exception {
-        var server = new TestServer();
-        Thread.startVirtualThread(server);
-        var states = new LinkedBlockingQueue<ConnectionState>();
-        var client = spy(new SocketClient(plainProvider(server.getLocalPort())));
-        doReturn(true).when(client).probeReachable(any(Duration.class));
-        client.addStateChangeListener((s, ts) -> states.add(s));
-
-        try (client) {
+        try (var server = new FakeFusionNode();
+                var client = new SocketClient(server.sockets())) {
+            var states = new LinkedBlockingQueue<ConnectionState>();
+            client.addStateChangeListener((s, ts) -> states.add(s));
             client.start();
+            assertEquals(ConnectionState.CONNECTING, states.take());
+            assertEquals(ConnectionState.CONNECTED, states.take());
 
-            assertEquals(ConnectionState.CONNECTING, states.poll(2, SECONDS));
-            assertEquals(ConnectionState.CONNECTED, states.poll(2, SECONDS));
+            server.drop();
 
-            server.close();
-
-            assertEquals(ConnectionState.DISCONNECTED, states.poll(3, SECONDS));
+            assertEquals(ConnectionState.DISCONNECTED, states.take());
         }
     }
 
@@ -141,26 +105,20 @@ class SocketClientStatusTest {
     }
 
     @Test
-    @Timeout(5)
     void testListenerExceptionDoesNotCrashClient() throws Exception {
-        var server = new TestServer();
-        Thread.startVirtualThread(server);
-        var states = new LinkedBlockingQueue<ConnectionState>();
-        var client = spy(new SocketClient(plainProvider(server.getLocalPort())));
-        doReturn(true).when(client).probeReachable(any(Duration.class));
+        try (var server = new FakeFusionNode();
+                var client = new SocketClient(server.sockets())) {
+            var states = new LinkedBlockingQueue<ConnectionState>();
+            client.addStateChangeListener(
+                    (s, ts) -> {
+                        throw new RuntimeException("boom");
+                    });
+            client.addStateChangeListener((s, ts) -> states.add(s));
 
-        client.addStateChangeListener(
-                (s, ts) -> {
-                    throw new RuntimeException("boom");
-                });
-        client.addStateChangeListener((s, ts) -> states.add(s));
-
-        try (server;
-                client) {
             client.start();
 
-            assertEquals(ConnectionState.CONNECTING, states.poll(2, SECONDS));
-            assertEquals(ConnectionState.CONNECTED, states.poll(2, SECONDS));
+            assertEquals(ConnectionState.CONNECTING, states.take());
+            assertEquals(ConnectionState.CONNECTED, states.take());
         }
     }
 
@@ -182,25 +140,19 @@ class SocketClientStatusTest {
     }
 
     @Test
-    @Timeout(3)
-    void testProbeReachableReturnsTrueWhenOpen() throws Exception {
-        try (var serverSocket = new ServerSocket(0)) {
-            var client = new SocketClient(plainProvider(serverSocket.getLocalPort()));
-            try (client) {
-                assertTrue(client.probeReachable(Duration.ofSeconds(1)));
-            }
+    void testProbeReachableReturnsTrueWhenOpen() {
+        try (var server = new FakeFusionNode();
+                var client = new SocketClient(server.sockets())) {
+            assertTrue(client.probeReachable(Duration.ofSeconds(1)));
         }
     }
 
     @Test
-    @Timeout(3)
-    void testProbeReachableReturnsFalseWhenClosed() throws Exception {
-        int port;
-        try (var serverSocket = new ServerSocket(0)) {
-            port = serverSocket.getLocalPort();
-        }
-        var client = new SocketClient(plainProvider(port));
-        try (client) {
+    void testProbeReachableReturnsFalseWhenClosed() {
+        try (var server = new FakeFusionNode();
+                var client = new SocketClient(server.sockets())) {
+            server.goUnreachable();
+
             assertFalse(client.probeReachable(Duration.ofMillis(500)));
         }
     }

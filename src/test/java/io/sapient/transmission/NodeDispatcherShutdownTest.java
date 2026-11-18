@@ -1,270 +1,108 @@
 package io.sapient.transmission;
 
-import static io.sapient.transmission.NodeDispatcherTest.AWAIT_MS;
-import static io.sapient.transmission.NodeDispatcherTest.FUSION_NODE_ID;
-import static io.sapient.transmission.NodeDispatcherTest.captureSubscription;
-import static io.sapient.transmission.NodeDispatcherTest.mockNode;
-import static io.sapient.transmission.NodeDispatcherTest.sendAck;
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.argThat;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.timeout;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
-import io.sapient.transport.IClient;
+import io.sapient.testing.Async;
+import io.sapient.testing.FakeEdgeNode;
+import io.sapient.testing.FakeFusionNode;
+import io.sapient.testing.Held;
+import io.sapient.testing.NodeCall;
+import io.sapient.testing.TestConfig;
 import java.time.Duration;
-import java.util.UUID;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.LockSupport;
-import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.mockito.stubbing.Answer;
-import uk.gov.dstl.sapientmsg.bsiflex335v2.SapientMessage;
-import uk.gov.dstl.sapientmsg.bsiflex335v2.StatusReport;
 
-/** Shutdown behaviour of {@link NodeDispatcher} with several nodes registered. */
+/**
+ * Shutdown behaviour of {@link NodeDispatcher}: when the client closes, and what nodes still send.
+ */
 @Execution(ExecutionMode.CONCURRENT)
 class NodeDispatcherShutdownTest {
 
-    /** How long a close() that does not wait for its nodes is given to run ahead. */
-    private static final Duration CLOSE_HEADSTART = Duration.ofSeconds(1);
+    private final FakeFusionNode server = new FakeFusionNode();
 
-    private static NodeDispatcherConfig config() {
-        return config(Duration.ofMillis(10));
-    }
+    @Test
+    void clientClosedExactlyOnceWhenNodesGoOfflineThenDispatcherCloses() {
+        var n1 = new FakeEdgeNode("n1");
+        var n2 = new FakeEdgeNode("n2");
+        var dispatcher = server.connect(n1, n2);
+        n1.expect("ack accepted");
+        n2.expect("ack accepted");
 
-    private static NodeDispatcherConfig config(Duration onlineCheckInterval) {
-        return new NodeDispatcherConfig(
-                onlineCheckInterval,
-                Duration.ofSeconds(5),
-                Duration.ofSeconds(5),
-                Duration.ofMinutes(2),
-                FUSION_NODE_ID,
-                Duration.ZERO);
-    }
+        n1.goOffline();
+        n2.goOffline();
+        server.awaitDisconnects(1);
+        dispatcher.close();
 
-    /** A mocked client that reports no detection delay. These tests drive the timing themselves. */
-    static IClient mockClient() {
-        IClient client = mock(IClient.class);
-        when(client.connectionLossDetectionDelay()).thenReturn(Duration.ZERO);
-        return client;
-    }
-
-    /** Waits for the latch, restoring the interrupt flag afterwards instead of bailing out. */
-    private static void awaitIgnoringInterruption(CountDownLatch latch) {
-        boolean interrupted = false;
-        while (latch.getCount() > 0) {
-            try {
-                latch.await();
-            } catch (InterruptedException e) {
-                interrupted = true;
-            }
-        }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    private static SapientMessage isRegistration() {
-        return argThat(
-                (SapientMessage m) ->
-                        m.getContentCase() == SapientMessage.ContentCase.REGISTRATION);
-    }
-
-    private static SapientMessage isStatusReport() {
-        return argThat(
-                (SapientMessage m) ->
-                        m.getContentCase() == SapientMessage.ContentCase.STATUS_REPORT);
-    }
-
-    /** A status report from the status loop, as opposed to the goodbye sent by {@code close()}. */
-    private static SapientMessage isLiveStatusReport() {
-        return argThat(
-                (SapientMessage m) ->
-                        m.getContentCase() == SapientMessage.ContentCase.STATUS_REPORT
-                                && m.getStatusReport().getSystem()
-                                        != StatusReport.System.SYSTEM_GOODBYE);
+        assertEquals(1, server.disconnects());
     }
 
     @Test
-    @Timeout(20)
-    void clientClosedExactlyOnceWhenNodesGoOfflineThenDispatcherCloses() throws Exception {
-        UUID nodeId1 = UUID.randomUUID();
-        UUID nodeId2 = UUID.randomUUID();
-        AtomicBoolean online1 = new AtomicBoolean(true);
-        AtomicBoolean online2 = new AtomicBoolean(true);
-        IClient client = mockClient();
-        NodeDispatcher dispatcher = new NodeDispatcher(client, config());
-        Consumer<SapientMessage> onMessage = captureSubscription(client);
+    void unregisterClosesClientWhenLastOnlineNodeRemoved() {
+        var node = new FakeEdgeNode("n1");
+        var dispatcher = server.connect(node);
+        server.await("n1 status OK new");
 
-        dispatcher.register(mockNode(nodeId1, online1, 50));
-        dispatcher.register(mockNode(nodeId2, online2, 50));
-
-        verify(client, timeout(AWAIT_MS).atLeast(2)).publish(isRegistration(), any(Duration.class));
-        sendAck(onMessage, nodeId1, true);
-        sendAck(onMessage, nodeId2, true);
-        verify(client, timeout(AWAIT_MS).atLeast(2)).publish(isStatusReport(), any(Duration.class));
-
-        online1.set(false);
-        online2.set(false);
-        verify(client, timeout(AWAIT_MS)).close();
+        dispatcher.unregister(node.asNode());
+        assertEquals(1, server.disconnects());
 
         dispatcher.close();
-        Thread.sleep(200);
-
-        verify(client, times(1)).close();
-    }
-
-    @Test
-    @Timeout(20)
-    void unregisterClosesClientWhenLastOnlineNodeRemoved() throws Exception {
-        UUID nodeId = UUID.randomUUID();
-        IClient client = mockClient();
-        INode node = mockNode(nodeId, new AtomicBoolean(true), 50);
-        NodeDispatcher dispatcher = new NodeDispatcher(client, config());
-        Consumer<SapientMessage> onMessage = captureSubscription(client);
-
-        dispatcher.register(node);
-        verify(client, timeout(AWAIT_MS)).publish(isRegistration(), any(Duration.class));
-        sendAck(onMessage, nodeId, true);
-        verify(client, timeout(AWAIT_MS).atLeastOnce())
-                .publish(isStatusReport(), any(Duration.class));
-
-        dispatcher.unregister(node);
-
-        verify(client, timeout(AWAIT_MS)).close();
-
-        dispatcher.close();
-        verify(client, times(1)).close();
+        assertEquals(1, server.disconnects());
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    @Timeout(20)
     void nodeCheckedDuringShutdownDoesNotStartTheClient(boolean online) throws Exception {
-        IClient client = mockClient();
-        CountDownLatch checking = new CountDownLatch(1);
-        NodeDispatcher dispatcher = new NodeDispatcher(client, config());
-        dispatcher.register(nodeCheckedDuringShutdown(online, checking));
-        assertTrue(checking.await(AWAIT_MS, TimeUnit.MILLISECONDS));
+        var node = FakeEdgeNode.builder("n1").withOfflineStart().build();
+        Held check = node.holdNext(NodeCall.ONLINE_CHECK); // a slow check, like a device ping
+        var dispatcher = server.connect(node);
+        check.awaitArrival();
 
-        dispatcher.close();
+        var closing = Async.run(dispatcher::close);
+        check.awaitInterrupt(); // close() stops the node in the middle of its online check
+        if (online) {
+            node.goOnline(); // the check reports a node that has just come online
+        }
+        check.release();
+        closing.join();
 
-        verify(client, never()).start();
+        assertEquals(0, server.connects());
     }
 
     @Test
-    @Timeout(20)
-    void nodeCheckedDuringShutdownStopsWithoutWaitingForTheNextCheck() throws Exception {
-        // the next check is a minute away, and close() gives up on a node thread after 5s
-        CountDownLatch checking = new CountDownLatch(1);
-        NodeDispatcher dispatcher = new NodeDispatcher(mockClient(), config(Duration.ofMinutes(1)));
-        dispatcher.register(nodeCheckedDuringShutdown(false, checking));
-        assertTrue(checking.await(AWAIT_MS, TimeUnit.MILLISECONDS));
+    void nodeCheckedDuringShutdownStopsWithoutWaitingForTheNextCheck() {
+        var node = FakeEdgeNode.builder("n1").withOfflineStart().build();
+        Held check = node.holdNext(NodeCall.ONLINE_CHECK);
+        var config = TestConfig.builder().withOnlineCheckInterval(Duration.ofMinutes(1)).build();
+        var dispatcher = server.connect(config, node);
+        check.awaitArrival();
 
-        assertTimeoutPreemptively(Duration.ofSeconds(4), dispatcher::close);
-    }
+        var closing = Async.run(dispatcher::close);
+        check.awaitInterrupt();
+        check.release();
 
-    /**
-     * A node whose online check is still running when close() stops it, like a slow device ping.
-     * The check returns {@code online} once the stop has arrived.
-     */
-    private static INode nodeCheckedDuringShutdown(boolean online, CountDownLatch checking) {
-        INode node = mock(INode.class);
-        when(node.getNodeId()).thenReturn(UUID.randomUUID());
-        Answer<Boolean> slowCheck =
-                inv -> {
-                    checking.countDown();
-                    while (!Thread.currentThread().isInterrupted()) {
-                        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
-                    }
-                    return online;
-                };
-        when(node.isOnline()).thenAnswer(slowCheck);
-        return node;
+        // close() gives up on a node thread after 5 s; a node waiting for its next check takes that
+        assertTimeoutPreemptively(Duration.ofSeconds(4), closing::join);
     }
 
     @Test
-    @Timeout(25)
     void nodeDoesNotPublishAfterClientClosed() throws Exception {
-        UUID nodeId = UUID.randomUUID();
-        IClient client = mockClient();
-        AtomicBoolean clientClosed = new AtomicBoolean(false);
-        AtomicBoolean publishedAfterClose = new AtomicBoolean(false);
+        var node = new FakeEdgeNode("n1");
+        Held report = node.holdNext(NodeCall.STATUS_REPORT); // the lifecycle's first report
+        var dispatcher = server.connect(node);
+        report.awaitArrival();
 
-        Answer<Void> closeAnswer =
-                inv -> {
-                    clientClosed.set(true);
-                    return null;
-                };
-        doAnswer(closeAnswer).when(client).close();
+        var closing = Async.run(dispatcher::close);
+        report.awaitInterrupt(); // close() has stopped the node while it builds its report
+        closing.awaitParkedOrDone(); // close() waits for the node before it closes the client
+        report.release();
+        closing.join();
 
-        Answer<Void> publishAnswer =
-                inv -> {
-                    if (clientClosed.get()) {
-                        publishedAfterClose.set(true);
-                    }
-                    return null;
-                };
-        doAnswer(publishAnswer)
-                .when(client)
-                .publish(any(SapientMessage.class), any(Duration.class));
-
-        // A node that stays inside its callback until this test lets it out, ignoring the
-        // interruption but restoring the flag on the way out so the lifecycle thread still
-        // terminates once the call returns. Only the first call blocks — holding up the
-        // goodbye published by close() as well would hide the late status report behind it.
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        AtomicBoolean firstCall = new AtomicBoolean(true);
-        Answer<StatusReport> blockingStatusReport =
-                inv -> {
-                    if (firstCall.compareAndSet(true, false)) {
-                        entered.countDown();
-                        awaitIgnoringInterruption(release);
-                    }
-                    return StatusReport.getDefaultInstance();
-                };
-        INode node = mockNode(nodeId, new AtomicBoolean(true), 50);
-        when(node.getStatusReport()).thenAnswer(blockingStatusReport);
-
-        NodeDispatcher dispatcher = new NodeDispatcher(client, config());
-        Consumer<SapientMessage> onMessage = captureSubscription(client);
-        dispatcher.register(node);
-
-        verify(client, timeout(AWAIT_MS)).publish(isRegistration(), any(Duration.class));
-        sendAck(onMessage, nodeId, true);
-        assertTrue(
-                entered.await(AWAIT_MS, TimeUnit.MILLISECONDS),
-                "the node lifecycle thread should be inside the callback");
-
-        // close() blocks until the node is done, so it cannot run on this thread
-        Thread closer = Thread.startVirtualThread(dispatcher::close);
-        // give a close() that does not wait for the node every chance to finish first
-        Thread.sleep(CLOSE_HEADSTART.toMillis());
-        release.countDown();
-
-        // the released node goes on to publish the status report it was holding. close() has
-        // interrupted its thread, so the report never reaches the client. close() returns only
-        // after the node is done, so the checks below run after both
-        closer.join(AWAIT_MS);
-
-        verify(client, never()).publish(isLiveStatusReport(), any(Duration.class));
-        assertFalse(
-                publishedAfterClose.get(), "no message may reach the client after it was closed");
+        // the interrupted node sends nothing more; close() sends the goodbye and is done
+        server.expect("n1 registration", "n1 goodbye new");
+        server.expectNothingMore();
     }
 }
