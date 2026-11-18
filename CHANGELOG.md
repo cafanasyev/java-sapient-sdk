@@ -429,3 +429,417 @@ A node is now notified whenever the server sends it an `Error`, with the full `E
 `Error` is always logged at DEBUG by the shared incoming-message logging added in §9 — independent
 of message routing, so it is logged whether or not a node is registered for the destination. No
 Error-specific logging is needed.
+
+## 11 — Auto-populate StatusReport.Info when the node leaves it unset
+
+### Problem
+
+`info` is a mandatory field of `StatusReport` (BSI Flex 335 v2.0). The SDK only acted on it when the
+node set `INFO_NEW`: such a report was downgraded to `INFO_UNCHANGED` when the content repeated the
+previous one. A node that left `info` unset published `INFO_UNSPECIFIED`, and its reports never took 
+part in de-duplication at all.
+
+A goodbye report had the same gap. It is sent from `NodeWrapper.close()` on top of whatever
+`node.getStatusReport()` returns, so it usually carried no `info` either.
+
+### Decision
+
+- **Fill `info` at publish time when the node leaves it unset.** `NodeDispatcher` compares the
+  report against the previous one of the same node: `INFO_UNCHANGED` when the content repeats,
+  `INFO_NEW` otherwise. For an unknown (not registered) node there is nothing to compare with, so
+  the value is `INFO_NEW`.
+
+- **Always set `INFO_NEW` on a goodbye** (`system = SYSTEM_GOODBYE`) and keep it out of
+  de-duplication. A node leaving is new information even when the rest of the report did not change.
+
+- **Keep an explicit `INFO_UNCHANGED` from the node as sent.** The node states that the content
+  repeats, so the SDK does not second-guess it. An explicit `INFO_NEW` still gets the existing
+  downgrade to `INFO_UNCHANGED` on repeated content (§7).
+
+### Result
+
+Every published `StatusReport` carries a valid `info`, so nodes no longer have to set the field
+themselves to stay protocol-compliant. De-duplication now works for those nodes as well: identical
+reports go out as `INFO_UNCHANGED`, and a goodbye always goes out as `INFO_NEW`.
+
+## 12 — Update lastStatusReport only after successful send
+
+### Problem
+
+`NodeDispatcher.publish(StatusReport, ...)` stored the report in `NodeWrapper.lastStatusReport` with
+`getAndSet` **before** giving the message to the transport. The store happened even when the send
+then failed. So `lastStatusReport` could hold content the server never received.
+
+That silently lost a state change:
+
+1. The node state changes. The report goes out as `INFO_NEW`.
+2. `IClient.publish` throws — publish deadline reached, or the client was stopped. Nothing reached
+   the server. `NodeWrapper.runStatusLoop` logs the timeout and keeps running.
+3. On the next tick the same content is published again. It equals `lastStatusReport`, so it goes out
+   as `INFO_UNCHANGED`.
+
+The server keeps the old state, and then gets "nothing changed" for a state it never received. The
+change stays invisible until the node content changes again.
+
+The python SDK (py-sapient-sdk) already has this check: a failed write keeps the previous report.
+
+### Decision
+
+- **Read `lastStatusReport`, send, then update it.** The update runs after `IClient.publish` returned
+  without an error. When the send throws, the exception leaves the method and the old value stays on
+  its own — no `try/catch` and no rollback needed.
+
+- **`compareAndSet` instead of `set`.** The read and the write are two steps now, so a concurrent
+  publish of the same node can land between them. The later writer loses instead of overwriting a
+  newer value.
+
+- **Every sent report is stored, with no exceptions.** A report the node pinned to `INFO_UNCHANGED`
+  also reached the server, so it is stored too — otherwise a change could be lost across a pinned
+  report. A goodbye is stored as well. It is harmless: `system` takes part in the content comparison,
+  so a stored goodbye never matches a normal report, and a goodbye itself is always `INFO_NEW`
+  without any comparison (§11).
+
+- **A failed send is treated as "not delivered".** `SocketClient.publish` retries on `IOException`
+  with a fresh connection. It throws only on the publish deadline or on a stopped client. So a clean
+  return means the bytes were written and flushed, but it is no proof that the server processed them.
+  When it is not clear, the SDK assumes the report did not arrive. One case is then one extra
+  `INFO_NEW` with the same content: the server sees the same state twice and nothing breaks. The
+  other case is worse — the SDK would send `INFO_UNCHANGED`, and the server would never learn the
+  new state.
+
+### Result
+
+`lastStatusReport` holds only content that reached the transport without an error. A failed status
+report is sent again as `INFO_NEW` on the next tick, so the server always learns about the change.
+Two tests cover it: a failed publish keeps the next identical report `INFO_NEW`, and a report pinned
+to `INFO_UNCHANGED` is stored for the next comparison.
+
+
+## 13 — Cap the message frame size
+
+### Problem
+
+`SocketClient.readLoop` allocated `new byte[len]` with `len` taken straight from the 4-byte
+length prefix on the wire. Nothing checked the value.
+
+The prefix is unsigned on the wire and signed in Java. A prefix of `0xFFFFFFFF` reads back as
+`-1`, so `new byte[-1]` threw `NegativeArraySizeException`. A large positive prefix threw
+`OutOfMemoryError` instead.
+
+Both are unchecked. `runLoop` catches only `EOFException` and `IOException`, so the exception
+escaped the loop and killed the virtual thread. After that the client was dead for good:
+`running` stayed `true` and `runLoopThread` stayed non-null, so `start()` refused to build a
+replacement loop. Nothing in the log said why.
+
+This is not only a hostile-input problem. `0xFFFFFFFF` is the pong sentinel of keepalive
+solution D, so a peer using that mode would crash the client on its first pong.
+
+### Decision
+
+- **Cap the body at 16 MiB** (`DEFAULT_MAX_FRAME_SIZE`), the same value the SAPIENT server uses.
+  The check widens the prefix with `Integer.toUnsignedLong` before comparing, so `0xFFFFFFFF` is
+  seen as 4294967295 and not as a small negative number. A frame above the cap raises
+  `IOException`, which `runLoop` already handles: the connection is dropped and retried.
+
+- **Let the caller change the cap.** A new `SocketClient` constructor takes `maxFrameSize`, next
+  to the existing timeouts. A deployment that knows its peer sends bigger or smaller messages
+  can set its own value; everything else keeps the 16 MiB default. A non-positive value is
+  rejected in the constructor, so the client cannot be built with a cap that blocks every frame.
+
+- **Catch `RuntimeException` in `runLoop` as well.** The cap fixes the one trigger we know
+  about, not the shape of the failure. Any unchecked exception from the read path is now
+  treated like a connection failure — log it, drop the connection, reconnect — instead of
+  killing the client silently.
+
+### Result
+
+A garbage or hostile length prefix costs one reconnect instead of a permanently dead client.
+A zero-length prefix still produces an empty `SapientMessage`, so nothing changes for a
+well-behaved peer.
+
+## 14 — Four health check types and a configurable failure count
+
+### Problem
+
+The client had one way to check the connection and no tolerance for a single failure.
+
+`SocketClient` ran a watchdog that opened a throwaway TCP connection to `host:port`. There was
+no way to use ICMP where it is allowed, and no way to use the keepalive the SAPIENT server
+implements ([dstl/SAPIENT-Proto-Files#12](https://github.com/dstl/SAPIENT-Proto-Files/issues/12)
+solutions C and D).
+
+The watchdog closed the socket on the **first** failed probe. One dropped packet or one busy
+accept queue cost a full reconnect, and past the grace period a re-registration.
+
+`NodeDispatcherConfig.connectionLossDetectionDelay` had to equal the client's `watchdogInterval
++ probeTimeout`, computed by the caller. Nothing checked it, and a wrong value breaks both
+re-registration checks from §3 and §4.
+
+### Decision
+
+- **One health check type per client**, chosen with `HealthCheckConfig`: `NETCAT` (TCP connect,
+  the old behaviour), `ICMP`, `ECHO` (solution C) and `PINGPONG` (solution D).
+  `TRANSPORT_NATIVE` is reserved for a future gRPC client and rejected by `SocketClient`.
+
+- **Fixed cadence, consecutive-failure count.** Checks start every `interval` whether the
+  previous one passed or failed, and the next check is anchored on the previous check's start.
+  Anchoring on the end would make failed checks retry back to back, so N failures would measure
+  one outage of `N × timeout` instead of tolerating a blip. `timeout <= interval` is enforced,
+  so two checks never overlap and the detection delay stays one line:
+  `failureThreshold × interval + timeout`. This is what SSH, BGP, OSPF, BFD, Kubernetes and gRPC
+  keepalive all do.
+
+- **The transport reports its own detection delay.** `IClient.connectionLossDetectionDelay()`
+  replaces the `NodeDispatcherConfig` field. A failure count cannot carry across transports —
+  gRPC closes on the first missed PING ACK and has no counter — but a duration can. The
+  dispatcher reads one number and never learns which mechanism produced it.
+
+- **Any inbound frame proves liveness.** The read path tells the monitor about every frame, which
+  pushes the next check back by a full interval and answers a pending in-band ping. A pong is
+  only one kind of proof; a `RegistrationAck` works as well. This also makes a wrong-mode setup
+  harmless: a server with keepalive off answers a zero-length frame with a validation `Error`,
+  and that `Error` passes the check.
+
+- **The in-band check queues for the write path like a publisher.** It never interrupts a write
+  in progress. Failing to take the write slot within `timeout` counts as a failed check — a
+  write path blocked that long is not a healthy connection, and it is the one case a priority
+  queue could not fix anyway, since a publisher stuck inside `write()` blocks any single writer
+  too. Known cost: a congested link can fail a check, which is what the failure threshold
+  absorbs.
+
+- **ICMP spawns the system `ping`.** `InetAddress.isReachable` falls back to a TCP connection on
+  port 7 when it cannot get the ICMP privilege, so unprivileged on Linux it calls a healthy host
+  dead. The `ping` binary carries `cap_net_raw` or the setuid bit and works without root, and the
+  Python SDK can do exactly the same.
+
+- **Clamp the retention window at zero.** `3 × statusInterval + grace − detectionDelay` can go
+  negative with a large interval or threshold. A negative window means "re-register on every
+  tick", so it is clamped and logged.
+
+### Result
+
+Four interchangeable liveness checks behind one config record. A single failed check no longer
+costs a reconnect. The detection delay cannot drift out of sync with the transport, because the
+transport is what reports it.
+
+Defaults keep today's mechanism with the standard failure count: `NETCAT`, 10s interval, 2s
+timeout, threshold 3. Detection moves from 12s to 32s — the price of tolerating two lost probes
+instead of zero, absorbed by the retention budget. To get the old speed back, lower the interval
+rather than the threshold: `4s / 2s / 3` detects in 14s and still tolerates two lost probes.
+
+**Breaking:** `NodeDispatcherConfig` lost its `connectionLossDetectionDelay` component and
+`defaults(destinationId, delay)` became `defaults(destinationId)`. The four-argument
+`SocketClient(provider, probeTimeout, initialReconnectDelay, watchdogInterval)` constructor
+became `SocketClient(provider, HealthCheckConfig, initialReconnectDelay)`. The one-argument
+`SocketClient(provider)` is unchanged.
+
+## 15 — Make the publish timeout cover the write
+
+### Problem
+
+`SocketClient.publish` counted the wait for the connection against its timeout, but not the
+write. `OutputStream.write()` on a blocking socket has no time limit. When the server stops
+reading, the send buffer fills and `write()` blocks until the server reads again or the
+connection dies. A publish with a 5s timeout blocked until the health check dropped the
+connection, up to 32s with the defaults. A health check that kept passing left the publish
+blocked forever.
+
+The write cannot be abandoned at the deadline. The server reads exactly as many bytes as the
+length prefix says. If a new frame started after half of the current frame, the server would
+read the new frame's bytes as the rest of the current frame. Every later frame on the
+connection would then be misread. Closing the socket at the deadline keeps the framing safe,
+but one caller's timeout would then drop the connection for every node.
+
+The same blocking write caused two more failures:
+
+- The in-band health check wrote its ping on the monitor thread. With the send buffer full, the
+  monitor thread blocked inside `write()`. The monitor stopped counting failed checks, so the
+  dead connection was never dropped.
+- `NodeWrapper.close()` interrupts the node's virtual thread. On a virtual thread, an interrupt
+  during a socket write closes the socket. Stopping a node in the middle of a write dropped the
+  connection for all nodes.
+
+### Decision
+
+- **Each frame is written on a new virtual thread, the write thread.** The caller takes the
+  connection from the slot as before and hands the frame to the write thread. Then the caller
+  waits for the write thread with `Future.get` until the deadline. The write thread puts the
+  connection back into the slot only after the last byte, so no other frame can start in the
+  middle of the current frame. This is the Go pattern of a goroutine plus `select` on
+  `ctx.Done()`.
+
+- **A timeout stops the wait, not the write.** At the deadline `publish` throws
+  `TimeoutException("publish timeout: frame still being written")`. The write thread keeps
+  writing, and the next publisher waits for the slot until the frame is done. The socket stays
+  open.
+
+- **Nothing interrupts the write thread.** An interrupt of the caller stops only the caller's
+  wait. `Future.cancel(true)` is never called: it would interrupt the write thread, and the
+  interrupt would close the socket.
+
+- **The ping goes through the same write thread.** The monitor thread never writes to the socket
+  itself. A ping still being written at the check timeout counts as a failed check, the same as
+  a write slot that cannot be taken in time.
+
+### Result
+
+`publish` never blocks past its timeout. Only the thread holding the slot starts a write thread,
+so each connection has at most one stuck write. Every other publisher waits for the slot and
+times out without sending. A write thread costs 4–5 µs per publish, measured on the development
+machine.
+
+A `TimeoutException` now has two meanings. Thrown before the write started, the message was not
+sent. Thrown during the write, the message still reaches the server unless the connection dies.
+A caller that retries may then deliver the message twice. The Python SDK behaves the same way:
+`writer.write()` puts the whole frame into the buffer, and the timeout cancels only `drain()`.
+
+`NodeWrapper` treats `TimeoutException` as "try again on the next cycle". One consequence was
+missed here. After a timed-out status report, the next report was still compared with the report
+before it. If the content went back to that older report, it went out as `INFO_UNCHANGED` while
+the server held the timed-out one. §16 fixes this: a failed publish now leaves the last report
+unknown.
+
+Known limit: with `NETCAT` or `ICMP` checks, a server that stops reading but still accepts TCP
+connections is never declared dead. The write thread stays stuck, and every publish times out.
+The old code had the same limit. `ECHO` and `PINGPONG` catch this case: the pings cannot get
+through, and the monitor drops the connection after `failureThreshold` failed checks.
+
+## 16 — Decide StatusReport.Info in the order the server receives the reports
+
+### Problem
+
+`INFO_UNCHANGED` tells the server that nothing changed since the previous report. `NodeDispatcher`
+decided it against `NodeWrapper.lastStatusReport` in four separate steps: read the last report,
+compare, send, store with `compareAndSet`. The node lifecycle and an external call can publish a
+status report of the same node at the same time, and nothing kept the four steps of one publish
+together. In each example below the server last held OK:
+
+- **A later report overtook an earlier one.** The lifecycle compared OK with OK and decided
+  `INFO_UNCHANGED`. Before that report reached the server, an external FAULT went out as
+  `INFO_NEW`. The server then got OK marked unchanged right after FAULT, and kept FAULT.
+- **The store kept the wrong report.** DEGRADED and FAULT both compared with OK and went out in
+  that order. DEGRADED was stored first, so the `compareAndSet` of FAULT failed. The node
+  remembered DEGRADED while the server held FAULT, and the next DEGRADED went out as unchanged.
+- **A timed-out report still arrived.** Since §15, a publish that times out during the write still
+  delivers the frame. FAULT timed out but arrived, and the node kept OK as its last report. The
+  next OK went out as unchanged.
+
+Two more events left the remembered report wrong:
+
+- **Registration.** After a re-registration the server starts over, but the first status report
+  was still compared with the report from before.
+- **Reconnect.** A report written just before the connection dropped may never have arrived. The
+  first report after the reconnect was still compared with it.
+
+### Decision
+
+- **The last report is the lock.** `LastSent` keeps the last report the server is known to have
+  as the only element of a queue of one. A publish takes the report out, decides the info against
+  it, sends, and puts back what it sent. While the report is out, no other status report of the
+  node can be decided or sent. The server therefore gets a node's reports in the order their info
+  was decided. `SocketClient.connectionSlot` works the same way: the connection itself is the lock.
+
+- **`LastSent.send` is the only way to the report, and it always puts back exactly one value.**
+  The value is the report that was sent, or "unknown" when the send threw. Every failure leaves
+  "unknown" without a rule of its own: a timeout, an interrupt, a stopped client, an unchecked
+  exception. After "unknown" the next report goes out as `INFO_NEW`, which is always safe.
+
+- **The wait for the report counts against the caller's timeout.** A report that waits behind
+  another report of the same node gives up at its own deadline and sends nothing. Each node has
+  its own `LastSent`, so reports of different nodes do not wait for each other here.
+
+- **A registration goes through the same path.** It carries no status report, so it leaves the
+  last report unknown.
+
+- **A report counts only on the connection it was sent on.** `NodeDispatcher` numbers the
+  connections and moves to the next number on every `DISCONNECTED`. A report from an older
+  connection is unknown.
+
+- **Removed:** `NodeWrapper.lastStatusReport`, the `compareAndSet`, and the reset after a goodbye.
+  A goodbye now simply becomes the last report. `system` takes part in the comparison, so a
+  goodbye never matches a normal report (§12).
+
+### Result
+
+`StatusReportInfoTest` covers every case above through the public API. Only the transport is
+faked: it records each report as it reaches the server, can hold a report back, and can deliver a
+report and still fail its publish. Two of its tests guard the design: reports of different nodes
+do not wait for each other, and the report after a goodbye goes out as `INFO_NEW`. The white-box
+test `lastStatusReportClearedAfterGoodbye` went away with the field.
+
+Cost: status reports and registrations of one node go out one at a time. Each one waits for the
+previous one at most until its own deadline.
+
+Behaviour change: a node thread interrupted by `close()` can no longer publish. `LastSent` waits
+in an interruptible `poll`, so the publish throws `InterruptedException` before it reaches the
+client. With `SocketClient` the outcome was already the same, because `SocketClient` also waits in
+an interruptible `poll`. `NodeDispatcherShutdownTest.nodeDoesNotPublishAfterClientClosed` now
+expects the late status report not to reach the client at all.
+
+The Python SDK has the same three races: an `await` sits between reading `previous` and storing
+it. It is not changed here.
+
+## 17 — Auto-populate alert_id in Alert when empty
+
+### Problem
+
+`alert_id` is a mandatory ULID on `Alert`, marked in the proto exactly like `report_id`: "ULID for
+the message". §8 fills `report_id` for status and detection reports, but alerts went out as the
+node handed them over. A node that left `alert_id` empty sent a message without its mandatory
+field. The server answers an alert with an `AlertAck` that carries the same `alert_id`, so an
+alert without an id also has no way to be matched with its ack.
+
+The test harness filled the gap on its own side. It generated one `alert_id` per alert file and
+reused it on every send until the files were reloaded.
+
+### Decision
+
+- **Generate a ULID at publish time when `alert_id` is empty**, the same rule as §8. An
+  `alert_id` the node already set goes out unchanged, so the node can send the same alert again,
+  for example with `ALERT_STATUS_CLEAR`.
+
+- **The caller learns the generated id from the returned message.** `publish` returns the message
+  as sent, so the node can match the `AlertAck` that comes back.
+
+### Result
+
+Every published `Alert` carries a valid `alert_id`. Nodes that set their own keep full control.
+
+The Python SDK does not fill `alert_id` yet.
+
+## 18 — A node stopped during its online check no longer starts the client
+
+### Problem
+
+`NodeWrapper.waitUntilOnline()` looped while the node was offline and its thread was not
+interrupted. So it returned normally in two cases: the node came online, or a stop arrived while
+`isOnline()` was running. `_run()` took every normal return to mean "online" and called
+`onNodeOnline()`. An offline node that `close()` was stopping reported itself as online, and
+`onNodeOnline()` started the client again. During shutdown the client could open a new
+connection to the server, which `close()` then closed again.
+
+The window is the time `isOnline()` takes. In the tests it is a few microseconds, so
+`clientClosedExactlyOnceWhenNodesGoOfflineThenDispatcherCloses` failed 2 to 3 times in 900 runs.
+A node whose `isOnline()` pings a device for 200 ms, with the default 5s check interval, leaves a
+window of 200 ms in every 5.2 s.
+
+### Decision
+
+- **`waitUntilOnline()` returns only once the node is online.** The interrupt is no longer part
+  of the loop condition. A stop always surfaces as `InterruptedException`, because `Thread.sleep`
+  throws at once for a thread that is already interrupted.
+
+- **A closing dispatcher never starts the client.** `onNodeOnline()` now checks `closing`, as
+  `onNodeOffline()` already did. This covers a node that really comes online while `close()`
+  runs.
+
+### Result
+
+`NodeDispatcherShutdownTest.nodeCheckedDuringShutdownDoesNotStartTheClient` stops a node in the
+middle of a slow online check, once for a node that stays offline and once for a node that comes
+online. Both cases failed every time before the change. Afterwards
+`clientClosedExactlyOnceWhenNodesGoOfflineThenDispatcherCloses` passed 900 runs in a row.
+
+`nodeCheckedDuringShutdownStopsWithoutWaitingForTheNextCheck` makes sure the stop does not wait
+for the next check. With a one-minute check interval, `close()` must return within 4 s. A
+`waitUntilOnline()` that swallows the interrupt and keeps waiting fails this test.

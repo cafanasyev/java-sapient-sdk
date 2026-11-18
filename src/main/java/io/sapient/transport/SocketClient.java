@@ -1,6 +1,14 @@
 package io.sapient.transport;
 
 import com.google.protobuf.InvalidProtocolBufferException;
+import io.sapient.transport.health.HealthCheckConfig;
+import io.sapient.transport.health.HealthCheckType;
+import io.sapient.transport.health.HealthMonitor;
+import io.sapient.transport.health.IHealthCheck;
+import io.sapient.transport.health.IcmpHealthCheck;
+import io.sapient.transport.health.InBandHealthCheck;
+import io.sapient.transport.health.KeepalivePrefixes;
+import io.sapient.transport.health.NetcatHealthCheck;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -15,6 +23,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -39,6 +49,7 @@ public class SocketClient implements IClient {
         private final Socket socket;
         private final InputStream in;
         private final OutputStream out;
+        private final AtomicBoolean closed = new AtomicBoolean(false);
 
         private Connection(ISocketProvider socketProvider) throws IOException {
             socket = socketProvider.get();
@@ -46,8 +57,16 @@ public class SocketClient implements IClient {
             out = socket.getOutputStream();
         }
 
+        /**
+         * Closes the socket, at most once. The run loop, the watchdog and {@link
+         * SocketClient#close()} all reach for the same connection, so the flag keeps them from
+         * closing the socket several times over.
+         */
         @Override
         public void close() {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
             log.info("closing socket");
             // SSLSocket.close() can block on a dead TLS connection; don't wait for it.
             Thread.startVirtualThread(
@@ -61,60 +80,100 @@ public class SocketClient implements IClient {
                     });
         }
 
-        private boolean isConnected() {
-            return socket.isConnected();
+        /**
+         * Returns {@code true} while this connection can still carry a message. {@link
+         * Socket#isConnected()} alone is not enough: it stays {@code true} for the rest of the
+         * socket's life once the connection was established, closed or not.
+         */
+        private boolean isUsable() {
+            return !closed.get() && socket.isConnected() && !socket.isClosed();
         }
     }
 
-    private static final Duration DEFAULT_PROBE_TIMEOUT = Duration.ofSeconds(2);
     private static final Duration DEFAULT_INITIAL_RECONNECT_DELAY = Duration.ofSeconds(1);
-    private static final Duration DEFAULT_WATCHDOG_INTERVAL = Duration.ofSeconds(10);
 
-    private final ISocketProvider socketProvider;
-    private final Duration probeTimeout;
-    private final Duration initialReconnectDelay;
-    private final Duration watchdogInterval;
+    /** How long {@link #close()} waits for the run loop to finish before giving up on it. */
+    private static final Duration RUN_LOOP_STOP_TIMEOUT = Duration.ofSeconds(5);
 
     /**
-     * Creates a client that obtains connections from the given provider.
+     * Largest message body we will allocate for by default, in bytes. A garbage or hostile length
+     * prefix cannot make the client allocate more than this. Same value as the SAPIENT server uses.
+     */
+    static final int DEFAULT_MAX_FRAME_SIZE = 16 << 20;
+
+    private final ISocketProvider socketProvider;
+    private final HealthCheckConfig healthCheckConfig;
+    private final Duration initialReconnectDelay;
+    private final int maxFrameSize;
+
+    /** Null when the health check puts nothing on the wire, which is the NETCAT and ICMP case. */
+    private final KeepalivePrefixes prefixes;
+
+    /**
+     * Creates a client with the default health check: a TCP connect probe every 10 seconds, a 2
+     * second probe timeout, and 3 failures in a row before the connection is dropped.
      *
      * @param socketProvider supplies new socket connections and describes the remote address
      */
     public SocketClient(@NonNull ISocketProvider socketProvider) {
-        this(
-                socketProvider,
-                DEFAULT_PROBE_TIMEOUT,
-                DEFAULT_INITIAL_RECONNECT_DELAY,
-                DEFAULT_WATCHDOG_INTERVAL);
+        this(socketProvider, HealthCheckConfig.DEFAULT, DEFAULT_INITIAL_RECONNECT_DELAY);
     }
 
     /**
-     * Creates a client with configurable timeouts.
+     * Creates a client with an explicit health check.
      *
      * @param socketProvider supplies new socket connections and describes the remote address
-     * @param probeTimeout timeout for reachability probes (applies to both watchdog probes and the
-     *     public {@link #probeReachable(Duration)} call)
+     * @param healthCheckConfig which liveness check to run, how often, and how many failures in a
+     *     row end the connection
      * @param initialReconnectDelay base delay for the first reconnect attempt; scaled linearly by
      *     attempt count (capped at 10x)
-     * @param watchdogInterval how often the watchdog runs a reachability probe while the connection
-     *     is established. Detection of a silently-dead peer is bounded by {@code watchdogInterval +
-     *     probeTimeout}
+     * @throws IllegalArgumentException if the health check type cannot run over a raw socket
      */
     public SocketClient(
             @NonNull ISocketProvider socketProvider,
-            @NonNull Duration probeTimeout,
+            @NonNull HealthCheckConfig healthCheckConfig,
+            @NonNull Duration initialReconnectDelay) {
+        this(socketProvider, healthCheckConfig, initialReconnectDelay, DEFAULT_MAX_FRAME_SIZE);
+    }
+
+    /**
+     * Creates a client with a configurable health check and frame size limit.
+     *
+     * @param socketProvider supplies new socket connections and describes the remote address
+     * @param healthCheckConfig how the connection is checked for liveness
+     * @param initialReconnectDelay base delay for the first reconnect attempt; scaled linearly by
+     *     attempt count (capped at 10x)
+     * @param maxFrameSize largest message body accepted, in bytes. A length prefix above this drops
+     *     the connection instead of allocating for it. Must be positive
+     * @throws IllegalArgumentException if the health check type cannot run over a raw socket, or if
+     *     {@code maxFrameSize} is not positive
+     */
+    public SocketClient(
+            @NonNull ISocketProvider socketProvider,
+            @NonNull HealthCheckConfig healthCheckConfig,
             @NonNull Duration initialReconnectDelay,
-            @NonNull Duration watchdogInterval) {
+            int maxFrameSize) {
+        if (healthCheckConfig.type() == HealthCheckType.TRANSPORT_NATIVE) {
+            throw new IllegalArgumentException(
+                    "SocketClient does not support TRANSPORT_NATIVE: a raw socket has no built-in"
+                            + " keepalive");
+        }
+        if (maxFrameSize <= 0) {
+            throw new IllegalArgumentException("maxFrameSize must be positive: " + maxFrameSize);
+        }
         this.socketProvider = socketProvider;
-        this.probeTimeout = probeTimeout;
+        this.healthCheckConfig = healthCheckConfig;
         this.initialReconnectDelay = initialReconnectDelay;
-        this.watchdogInterval = watchdogInterval;
+        this.maxFrameSize = maxFrameSize;
+        this.prefixes = KeepalivePrefixes.of(healthCheckConfig.type());
     }
 
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     // connection slot: empty = disconnected, contains connection = available for publishing
-    // capacity 1 acts as both connection gate and publish mutex
+    // capacity 1 acts as both connection gate and publish mutex. The write thread puts the
+    // connection back only after the last byte of its frame. A publish that timed out has
+    // already returned by then (see writeFrame)
     private final BlockingQueue<Connection> connectionSlot = new ArrayBlockingQueue<>(1, true);
 
     private final AtomicReference<Consumer<SapientMessage>> consumer = new AtomicReference<>();
@@ -125,10 +184,18 @@ public class SocketClient implements IClient {
     private final List<BiConsumer<ConnectionState, Instant>> stateListeners = new ArrayList<>();
     private final ReadWriteLock listenersLock = new ReentrantReadWriteLock();
 
+    // the thread running runLoop(), or null while no run loop is alive. Cleared by close()
+    // only after the loop has actually terminated, so a client can never end up with two.
+    private volatile Thread runLoopThread;
+
     @Override
     public void start() {
+        if (runLoopThread != null) {
+            log.warn("client is already running");
+            return;
+        }
         if (running.compareAndSet(false, true)) {
-            Thread.startVirtualThread(this::runLoop);
+            runLoopThread = Thread.startVirtualThread(this::runLoop);
         }
     }
 
@@ -141,7 +208,11 @@ public class SocketClient implements IClient {
             // listeners to chew on, which also means the dispatcher records the
             // outage start at the moment the connection actually died rather than
             // at the latest failed retry.
-            if (!probeReachable(probeTimeout)) {
+            // a plain TCP probe before every connect attempt, whatever the health check type
+            // is: we are about to open a TCP connection anyway, so this is always the right
+            // question to ask. Staying silent when it fails keeps CONNECTING → DISCONNECTED
+            // churn out of the listeners.
+            if (!probeReachable(healthCheckConfig.timeout())) {
                 sleepBeforeReconnect(++reconnectAttempts);
                 continue;
             }
@@ -149,12 +220,17 @@ public class SocketClient implements IClient {
             log.info("initializing new server connection");
             setState(ConnectionState.CONNECTING);
 
-            Thread watchdog = null;
-            try (Connection conn = connect()) {
+            Thread monitorThread = null;
+            Connection conn = null;
+            try {
+                conn = connect();
                 reconnectAttempts = 0;
                 setState(ConnectionState.CONNECTED);
-                watchdog = startWatchdog(conn);
-                readLoop(conn);
+                // one monitor per connection; closing the socket is how it reports a dead link
+                HealthMonitor monitor =
+                        new HealthMonitor(newHealthCheck(), healthCheckConfig, conn::close);
+                monitorThread = Thread.startVirtualThread(monitor);
+                readLoop(conn, monitor);
             } catch (EOFException e) {
                 if (running.get()) {
                     log.info("server closed the connection");
@@ -163,9 +239,23 @@ public class SocketClient implements IClient {
                 if (running.get()) {
                     log.error("server connection failure", e);
                 }
+            } catch (RuntimeException e) {
+                // an unchecked exception here would otherwise escape runLoop and kill the
+                // virtual thread. running stays true and runLoopThread stays non-null, so
+                // start() refuses to build a replacement and the client is dead for good.
+                // Treat it like any other connection failure: drop it and reconnect.
+                if (running.get()) {
+                    log.error("unexpected failure on the connection", e);
+                }
             } finally {
-                if (watchdog != null) {
-                    watchdog.interrupt();
+                if (monitorThread != null) {
+                    monitorThread.interrupt();
+                }
+                if (conn != null) {
+                    // take the connection out of the slot before closing it, or a publisher
+                    // would pick up a dead connection and write into a closed socket
+                    connectionSlot.remove(conn);
+                    conn.close();
                 }
                 setState(ConnectionState.DISCONNECTED);
             }
@@ -191,14 +281,44 @@ public class SocketClient implements IClient {
         }
     }
 
+    /**
+     * Stops the client and waits for its run loop to terminate. Safe to call several times and from
+     * several threads; only the first call has an effect. Waiting for the loop is what makes {@link
+     * #start()} safe to call afterwards — a client closed while its run loop sat in a reconnect
+     * backoff would otherwise be left with two loops competing for the same connection.
+     */
     @Override
     public void close() {
         log.info("stopping client");
         running.set(false);
-        setState(ConnectionState.CLOSED);
+        Thread loop = runLoopThread;
+        if (loop != null) {
+            loop.interrupt();
+        }
         Connection conn = connectionSlot.poll();
         if (conn != null) {
             conn.close();
+        }
+        awaitRunLoopStop(loop);
+        setState(ConnectionState.CLOSED);
+    }
+
+    private void awaitRunLoopStop(Thread loop) {
+        if (loop == null || loop == Thread.currentThread()) {
+            return;
+        }
+        try {
+            loop.join(RUN_LOOP_STOP_TIMEOUT);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("interrupted while waiting for the run loop to stop");
+            return;
+        }
+        if (loop.isAlive()) {
+            // leave runLoopThread set so start() refuses to add a second loop on top of it
+            log.error("run loop did not stop within {}", RUN_LOOP_STOP_TIMEOUT);
+        } else {
+            runLoopThread = null;
         }
     }
 
@@ -210,12 +330,16 @@ public class SocketClient implements IClient {
      * disconnected) and a publishing mutex (only one publisher can hold the connection at a time).
      *
      * @param msg - message to be sent to the server.
-     * @param timeout - timeout for waiting on both publish serialization and connection availability.
-     * @throws TimeoutException - will be thrown if publish is blocked by other threads for period above
-     *                          the specified timeout or SocketClient is unable to reconnect to the server
-     *                          socket within the specified timeout.
+     * @param timeout - deadline for the whole call: waiting for the connection, waiting behind other
+     *                publishers, and the write itself. The call never blocks past the deadline.
+     * @throws TimeoutException - will be thrown if the deadline passes first. If thrown before the
+     *                          write started, the message was not sent. If thrown during the write,
+     *                          the write thread still finishes the frame, and the server gets the
+     *                          message unless the connection dies. A caller that retries may then
+     *                          deliver the message twice.
      * @throws InterruptedException - will be thrown if the calling Thread is interrupted or the SocketClient
-     *                              is stopped.
+     *                              is stopped. An interrupt during the write stops only the wait. The
+     *                              frame still goes out, as after a timeout.
      */
     @Override
     @ThreadSafe
@@ -226,6 +350,7 @@ public class SocketClient implements IClient {
         }
 
         long deadline = System.nanoTime() + timeout.toNanos();
+        byte[] frame = frame(msg.toByteArray());
 
         // trying to reconnect and write message only until timeout reached or SocketClient is
         // stopped
@@ -240,32 +365,85 @@ public class SocketClient implements IClient {
                 throw new TimeoutException("publish timeout");
             }
 
-            if (!conn.isConnected()) {
+            if (!conn.isUsable()) {
                 continue;
             }
 
-            try {
-                byte[] bytes = msg.toByteArray();
-                int len = bytes.length;
-                byte[] frame =
-                        ByteBuffer.allocate(4 + len)
-                                .order(ByteOrder.LITTLE_ENDIAN)
-                                .putInt(len)
-                                .put(bytes)
-                                .array();
-                conn.out.write(frame);
-                conn.out.flush();
-                if (conn.isConnected() && !connectionSlot.offer(conn)) {
-                    log.error("failed to return connection to slot");
-                }
+            if (writeFrame(conn, frame, deadline)) {
                 return;
-            } catch (IOException e) {
-                log.error("failed to publish message to the server", e);
-                // don't put back — slot stays empty until reconnect re-offers
             }
+            // the connection died during the write; the loop waits for the next connection
         }
 
         throw new InterruptedException("SocketClient has been stopped");
+    }
+
+    /** Prepends the 4-byte little-endian length prefix required by BSI Flex 335 v2.0 §4.2. */
+    private static byte[] frame(byte[] body) {
+        return ByteBuffer.allocate(4 + body.length)
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(body.length)
+                .put(body)
+                .array();
+    }
+
+    /**
+     * Writes one frame on a new virtual thread, the write thread. The caller waits for the write
+     * thread until {@code deadline}. The caller must hold {@code conn}, taken from {@link
+     * #connectionSlot}. From here the write thread holds {@code conn}, and puts {@code conn} back
+     * into the slot after the last byte is out.
+     *
+     * <p>The write thread always finishes a frame it started. The peer reads exactly as many bytes
+     * as the length prefix says. If a new frame started after half of this frame, the peer would
+     * read the new frame's bytes as the rest of this frame. Every later frame on the connection
+     * would then be misread.
+     *
+     * <p>If the deadline comes first, the caller stops waiting and the write thread keeps writing.
+     * The next writer waits for the slot until the frame is done.
+     *
+     * <p>Nothing interrupts the write thread. An interrupt of the caller stops only the caller's
+     * wait. On a virtual thread, an interrupt during a socket write closes the socket. A closed
+     * socket would drop the connection for every other publisher.
+     *
+     * @return {@code true} once the whole frame is written, {@code false} if the connection died
+     *     during the write
+     * @throws TimeoutException if the frame is still being written at the deadline
+     * @throws InterruptedException if the calling thread is interrupted while waiting. The frame
+     *     still goes out, as after a timeout
+     */
+    private boolean writeFrame(Connection conn, byte[] frame, long deadline)
+            throws TimeoutException, InterruptedException {
+        FutureTask<Boolean> write = new FutureTask<>(() -> writeAndRelease(conn, frame));
+        Thread.ofVirtual().name("sapient-writer").start(write);
+        try {
+            return write.get(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
+        } catch (TimeoutException e) {
+            throw new TimeoutException("publish timeout: frame still being written");
+        } catch (ExecutionException e) {
+            // writeAndRelease catches IOException itself, so only an unchecked exception gets here
+            throw new IllegalStateException("frame write failed", e.getCause());
+        }
+    }
+
+    /**
+     * Runs on the write thread. Puts the connection back into the slot only after the last byte is
+     * out, so no other frame can start in the middle of this frame.
+     *
+     * @return {@code true} once the whole frame is written, {@code false} if the write failed
+     */
+    private boolean writeAndRelease(Connection conn, byte[] frame) {
+        try {
+            conn.out.write(frame);
+            conn.out.flush();
+        } catch (IOException e) {
+            log.error("failed to write to the server", e);
+            // don't put back — slot stays empty until reconnect re-offers
+            return false;
+        }
+        if (conn.isUsable() && !connectionSlot.offer(conn)) {
+            log.error("failed to return connection to slot");
+        }
+        return true;
     }
 
     /***
@@ -283,6 +461,11 @@ public class SocketClient implements IClient {
     @Override
     public ConnectionState getState() {
         return state.get();
+    }
+
+    @Override
+    public Duration connectionLossDetectionDelay() {
+        return healthCheckConfig.connectionLossDetectionDelay();
     }
 
     @Override
@@ -347,14 +530,26 @@ public class SocketClient implements IClient {
         return newConnection;
     }
 
-    private void readLoop(Connection connection) throws IOException {
+    private void readLoop(Connection connection, HealthMonitor monitor) throws IOException {
         byte[] lenBuf = new byte[4];
 
         while (running.get()) {
             readFully(connection.in, lenBuf, 4);
             int len = ByteBuffer.wrap(lenBuf).order(ByteOrder.LITTLE_ENDIAN).getInt();
+
+            // a keepalive frame has no body, so it can never become a SapientMessage.
+            // We consume it and never answer it — the client only ever initiates.
+            if (prefixes != null && (len == prefixes.ping() || len == prefixes.pong())) {
+                monitor.onInbound();
+                continue;
+            }
+
+            checkFrameSize(len, maxFrameSize);
             byte[] msgBuf = new byte[len];
             readFully(connection.in, msgBuf, len);
+
+            // any frame from the peer proves the pipe is alive, not only a pong
+            monitor.onInbound();
 
             Consumer<SapientMessage> cons = consumer.get();
             if (cons != null) {
@@ -368,32 +563,52 @@ public class SocketClient implements IClient {
     }
 
     /**
-     * Watches the connection by periodically running a reachability probe independently of the read
-     * path. On failure the watchdog closes the socket, which unblocks {@link #readLoop} (via {@code
-     * IOException}) and drives the {@link ConnectionState#DISCONNECTED} transition in {@link
-     * #runLoop}. This removes any reliance on {@code SO_TIMEOUT} firing promptly in {@link
-     * java.io.InputStream#read()}, which is not reliable on SSL sockets or when data trickles in
-     * slowly.
+     * Builds the health check for one connection. The monitor that drives it closes the socket
+     * after enough failed checks in a row, which unblocks the pending {@code InputStream.read()}
+     * and drives the {@link ConnectionState#DISCONNECTED} transition through the existing path in
+     * {@link #runLoop}. Detection does not depend on {@code SO_TIMEOUT}, which is not reliable on
+     * TLS sockets or when bytes trickle in.
      */
-    private Thread startWatchdog(Connection conn) {
-        return Thread.startVirtualThread(
-                () -> {
-                    while (running.get() && !Thread.currentThread().isInterrupted()) {
-                        try {
-                            Thread.sleep(watchdogInterval);
-                        } catch (InterruptedException e) {
-                            return;
-                        }
-                        if (!running.get() || Thread.currentThread().isInterrupted()) {
-                            return;
-                        }
-                        if (!probeReachable(probeTimeout)) {
-                            log.warn("watchdog probe failed, closing connection");
-                            conn.close();
-                            return;
-                        }
-                    }
-                });
+    private IHealthCheck newHealthCheck() {
+        Duration timeout = healthCheckConfig.timeout();
+        return switch (healthCheckConfig.type()) {
+            case NETCAT ->
+                    new NetcatHealthCheck(socketProvider.host(), socketProvider.port(), timeout);
+            case ICMP -> new IcmpHealthCheck(socketProvider.host(), timeout);
+            case ECHO, PINGPONG ->
+                    new InBandHealthCheck(prefixes.ping(), timeout, this::writePrefix);
+            case TRANSPORT_NATIVE -> throw new IllegalStateException("rejected in the constructor");
+        };
+    }
+
+    /**
+     * Writes a bare 4-byte prefix on the live connection for the in-band health check.
+     *
+     * <p>It queues on {@code connectionSlot} like any publisher, so a write already in progress is
+     * never interrupted. It returns {@code false} when the slot cannot be taken in time. It also
+     * returns {@code false} when the ping is still being written at the timeout. Either way, a
+     * blocked write path becomes a failed check.
+     *
+     * <p>The ping goes through {@link #writeFrame}, so the monitor thread never writes to the
+     * socket itself. A monitor thread stuck inside {@code write()} would stop counting failed
+     * checks, and the dead connection would never be dropped.
+     */
+    private boolean writePrefix(int prefix, Duration timeout) {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        byte[] ping = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(prefix).array();
+        try {
+            Connection conn = connectionSlot.poll(timeout.toNanos(), TimeUnit.NANOSECONDS);
+            if (conn == null || !conn.isUsable()) {
+                return false;
+            }
+            return writeFrame(conn, ping, deadline);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (TimeoutException e) {
+            // the ping write is blocked on a full send buffer, so the check fails
+            return false;
+        }
     }
 
     private void readFully(InputStream in, byte[] buf, int count) throws IOException {
@@ -404,6 +619,24 @@ public class SocketClient implements IClient {
                 throw new EOFException("connection to the server lost");
             }
             total += n;
+        }
+    }
+
+    /**
+     * Rejects a length prefix that no real SAPIENT message can have. The prefix is unsigned on the
+     * wire but signed in Java, so it is widened before the comparison — without that, {@code
+     * 0xFFFFFFFF} reads as -1, passes any {@code > MAX} test, and then blows up in {@code new
+     * byte[len]} with an unchecked NegativeArraySizeException.
+     *
+     * @param len length prefix as read from the wire
+     * @param maxFrameSize largest body accepted, in bytes
+     * @throws IOException if the body would be larger than {@code maxFrameSize}
+     */
+    static void checkFrameSize(int len, int maxFrameSize) throws IOException {
+        long size = Integer.toUnsignedLong(len);
+        if (size > maxFrameSize) {
+            throw new IOException(
+                    "frame too large: " + size + " bytes, max " + maxFrameSize + " bytes");
         }
     }
 }

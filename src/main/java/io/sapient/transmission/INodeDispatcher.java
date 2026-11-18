@@ -31,11 +31,13 @@ public interface INodeDispatcher extends AutoCloseable {
     void unregister(INode node);
 
     /**
-     * Publishes a {@link Registration} message for the given node.
+     * Publishes a {@link Registration} message for the given node. The server starts the node over
+     * with a registration, so the next status report of the node goes out as INFO_NEW.
      *
      * @param registration the registration message
      * @param nodeId the source node identifier
-     * @param timeout maximum time to wait
+     * @param timeout maximum time to wait, including the wait for a status report of the same node
+     *     that is still being sent
      * @return the {@link SapientMessage} as actually sent
      * @throws TimeoutException if the operation exceeds the given timeout
      * @throws InterruptedException if the calling thread is interrupted
@@ -44,13 +46,17 @@ public interface INodeDispatcher extends AutoCloseable {
             throws TimeoutException, InterruptedException;
 
     /**
-     * Publishes a {@link StatusReport} message for the given node. The {@link StatusReport.Info}
-     * field is computed automatically by comparing the report with the previously published one —
-     * callers should not set it.
+     * Publishes a {@link StatusReport} message for the given node. A goodbye always goes out as
+     * INFO_NEW. For any other report, unless the caller sets {@link StatusReport.Info} to
+     * INFO_UNCHANGED, the field is filled in: INFO_UNCHANGED when the content repeats the last
+     * report the server is known to have from this node, INFO_NEW otherwise. Status reports of one
+     * node go out one at a time, so the comparison follows the order in which the server receives
+     * them.
      *
-     * @param status the status report (the {@code info} field will be overwritten)
+     * @param status the status report
      * @param nodeId the source node identifier
-     * @param timeout maximum time to wait
+     * @param timeout maximum time to wait, including the wait for an earlier status report of the
+     *     same node
      * @return the {@link SapientMessage} as actually sent
      * @throws TimeoutException if the operation exceeds the given timeout
      * @throws InterruptedException if the calling thread is interrupted
@@ -72,7 +78,9 @@ public interface INodeDispatcher extends AutoCloseable {
             throws TimeoutException, InterruptedException;
 
     /**
-     * Publishes an {@link Alert} message for the given node.
+     * Publishes an {@link Alert} message for the given node. An empty {@code alert_id} is filled
+     * with a new ULID. An {@code alert_id} set by the caller goes out unchanged, so the caller can
+     * send the same alert again, for example to clear it.
      *
      * @param alert the alert message
      * @param nodeId the source node identifier

@@ -13,12 +13,6 @@ import lombok.NonNull;
  *     {@code Registration}
  * @param reconnectGracePeriod how long the server retains a registration after closing the TCP
  *     connection due to missed status reports (BSI Flex 335 v2.0 §4.9)
- * @param connectionLossDetectionDelay worst-case time between actual network loss and the client
- *     detecting it. Compute as {@code SocketClient watchdogInterval + probeTimeout}: the watchdog
- *     fires a reachability probe every {@code watchdogInterval}, and each probe blocks for up to
- *     {@code probeTimeout} before declaring the connection dead. Subtracted from the server
- *     retention window to account for status reports that were "published" into a dead TCP buffer
- *     before the watchdog noticed.
  * @param destinationId the fusion node recipient for all outbound messages
  * @param registrationJitterWindow uniform-random delay window applied before each registration
  *     message to spread the registration storm that occurs when many clients reconnect together
@@ -30,7 +24,6 @@ public record NodeDispatcherConfig(
         @NonNull Duration publishTimeout,
         @NonNull Duration registrationAckTimeout,
         @NonNull Duration reconnectGracePeriod,
-        @NonNull Duration connectionLossDetectionDelay,
         @NonNull UUID destinationId,
         @NonNull Duration registrationJitterWindow) {
 
@@ -41,23 +34,21 @@ public record NodeDispatcherConfig(
 
     /**
      * Returns a configuration with default values (5s polling, 5s publish timeout, 5s registration
-     * ack timeout, 2 min reconnect grace period). {@code connectionLossDetectionDelay} has no
-     * intrinsic default — callers must supply the value derived from the transport's watchdog and
-     * probe settings.
+     * ack timeout, 2 min reconnect grace period).
+     *
+     * <p>The connection-loss detection delay is not here any more. It belongs to the transport,
+     * because only the transport knows how liveness is checked, and the dispatcher reads it from
+     * the {@code IClient} it was given.
      *
      * @param destinationId the fusion node recipient for all outbound messages
-     * @param connectionLossDetectionDelay worst-case time between actual network loss and the
-     *     client detecting it (see record-level docs)
      * @return configuration with default intervals
      */
-    public static NodeDispatcherConfig defaults(
-            @NonNull UUID destinationId, @NonNull Duration connectionLossDetectionDelay) {
+    public static NodeDispatcherConfig defaults(@NonNull UUID destinationId) {
         return new NodeDispatcherConfig(
                 DEFAULT_ONLINE_CHECK_INTERVAL,
                 DEFAULT_PUBLISH_TIMEOUT,
                 DEFAULT_REGISTRATION_ACK_TIMEOUT,
                 DEFAULT_RECONNECT_GRACE_PERIOD,
-                connectionLossDetectionDelay,
                 destinationId,
                 Jitter.REGISTRATION_JITTER_WINDOW);
     }

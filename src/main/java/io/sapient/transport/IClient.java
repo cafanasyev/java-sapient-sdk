@@ -21,8 +21,10 @@ public interface IClient extends AutoCloseable {
      * Publishes a SAPIENT message to the connected server.
      *
      * @param msg message to send
-     * @param timeout maximum time to wait for the connection and write
-     * @throws TimeoutException if the operation exceeds the given timeout
+     * @param timeout maximum time the call blocks, covering both the wait for the connection and
+     *     the write
+     * @throws TimeoutException if the operation exceeds the given timeout. When the timeout hits
+     *     during the write, the message may still reach the server
      * @throws InterruptedException if the calling thread is interrupted or the client is stopped
      */
     void publish(SapientMessage msg, Duration timeout)
@@ -86,4 +88,21 @@ public interface IClient extends AutoCloseable {
      * @return {@code true} if the endpoint accepted the probe connection
      */
     boolean probeReachable(Duration timeout);
+
+    /**
+     * Worst case time between the network dying and this client reporting {@link
+     * ConnectionState#DISCONNECTED}.
+     *
+     * <p>The dispatcher subtracts it from the server retention window and adds it to the measured
+     * reconnect gap, so both re-registration checks are calibrated against the real outage rather
+     * than the moment the client happened to notice.
+     *
+     * <p>The transport owns this number because only the transport knows how liveness is
+     * determined. A socket client derives it from its health check settings; a gRPC client would
+     * derive it from its keepalive settings. A failure count does not carry across transports, a
+     * duration does.
+     *
+     * @return the worst-case detection delay, never {@code null}
+     */
+    Duration connectionLossDetectionDelay();
 }
